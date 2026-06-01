@@ -200,7 +200,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Generate a brief summary using Claude
         summary_resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=600,
             messages=[{
                 "role": "user",
@@ -267,7 +267,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1000,
             system=system,
             messages=conversation_history[uid]
@@ -307,3 +307,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

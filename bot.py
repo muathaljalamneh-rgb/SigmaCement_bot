@@ -305,7 +305,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         structured = extract_structured(file_bytes, doc.file_name)
 
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=800,
+            model="claude-sonnet-4-6", max_tokens=800,
             messages=[{"role":"user","content":
                 f"Summarize this cement report in 6 bullet points with exact numbers:\n\n{structured[:10000]}"}])
         summary = resp.content[0].text
@@ -346,7 +346,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=1200,
+            model="claude-sonnet-4-6", max_tokens=1200,
             system=system, messages=history)
         answer = response.content[0].text
         save_message(uid,"assistant",answer)

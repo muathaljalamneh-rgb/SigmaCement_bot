@@ -32,10 +32,12 @@ def get_db():
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Create tables if not exist
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS reports (
                     month_key   TEXT PRIMARY KEY,
                     filename    TEXT,
+                    raw_text    TEXT,
                     structured  TEXT,
                     summary     TEXT,
                     uploaded_at TEXT
@@ -46,6 +48,10 @@ def init_db():
                     content    TEXT,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
+            """)
+            # Add structured column if upgrading from old version
+            cur.execute("""
+                ALTER TABLE reports ADD COLUMN IF NOT EXISTS structured TEXT;
             """)
         conn.commit()
     logger.info("DB ready ✅")
@@ -226,11 +232,20 @@ Data includes for each product each day:
 - Raw material stock levels
 
 Rules:
-- Reply in the SAME language as the question (Arabic or English)
+- ALWAYS reply in ENGLISH regardless of the question language
 - Always cite SPECIFIC days and EXACT values
 - For anomalies, compare against monthly average
 - All clinker types (ROY, SFW, J, RAK, ALB, M) = "Total Clinker"
 - Be precise and detailed — never give vague summaries when exact data is available
+
+Formatting rules (strictly follow):
+- Use clear section headers with emoji: e.g. "📊 Production Overview"
+- Use tables for comparisons and rankings (markdown format)
+- Use bullet points for lists
+- Use ✅ for good/normal values, ⚠️ for warnings, 🔴 for critical issues
+- Bold important numbers and product names using *asterisks*
+- Keep answers structured: Header → Key numbers → Table/list → Conclusion
+- Never write long unformatted paragraphs
 
 Available reports:
 {reports_summary}

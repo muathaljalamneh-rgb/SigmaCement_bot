@@ -231,8 +231,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = resp.content[0].text
         save_report(mk, doc.file_name, structured, summary)
         await update.message.reply_text(
-            f"✅ *Saved:* `{doc.file_name}`\n📅 *Period:* {mk}\n\n*Summary:*\n{summary}",
-            parse_mode='Markdown')
+            f"✅ Saved: {doc.file_name}\nPeriod: {mk}\n\nSummary:\n{summary}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 

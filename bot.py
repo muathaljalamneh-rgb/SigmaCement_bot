@@ -84,27 +84,78 @@ def safe(x):
 
 def extract_structured(file_bytes, filename):
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
-    products = ['Power white','Super white','Eco white','CEM I 52,5 R','M50']
+    products = ['Power white','Super white','Eco white','CEM I 52,5 R','M50','M10','Flushing','flushing']
     lines = [f"REPORT: {filename}"]
 
-    # Daily data — compact one line per product per day
+    # ── SUMMARY SHEET — authoritative monthly totals ──────
+    # IMPORTANT: Always use Summary for monthly totals — daily sheets may be incomplete
+    summary_sheet = next((s for s in xl.sheet_names if 'summary' in s.lower()), None)
+    if summary_sheet:
+        try:
+            df_sum = pd.read_excel(io.BytesIO(file_bytes), sheet_name=summary_sheet, header=None)
+            lines.append("\n--- MONTHLY TOTALS (from Summary — USE THESE for production figures) ---")
+            for i in range(2, 12):
+                try:
+                    prod  = str(df_sum.iloc[i, 0]) if pd.notna(df_sum.iloc[i, 0]) else ''
+                    total = safe(df_sum.iloc[i, 1])
+                    tph   = safe(df_sum.iloc[i, 2])
+                    spc_m = safe(df_sum.iloc[i, 4])
+                    spc_t = safe(df_sum.iloc[i, 5])
+                    hrs   = safe(df_sum.iloc[i, 6])
+                    ck    = safe(df_sum.iloc[i, 7])
+                    if prod and prod not in ['nan',''] and total and total > 0:
+                        lines.append(f"MONTHLY|{prod}|Total={total:.2f}t|Hours={hrs:.1f}h|"
+                                     f"Avg_tph={tph:.2f}|SPC_mill={spc_m:.2f}|SPC_plant={spc_t:.2f}|CK={ck:.3f}")
+                except: pass
+            try:
+                avail = safe(df_sum.iloc[11, 0]); util  = safe(df_sum.iloc[11, 1])
+                grand = safe(df_sum.iloc[11, 2]); kwh   = safe(df_sum.iloc[11, 4])
+                spc   = safe(df_sum.iloc[11, 5]); tot_h = safe(df_sum.iloc[11, 6])
+                cost  = safe(df_sum.iloc[11, 7])
+                if grand:
+                    lines.append(f"GRAND_TOTAL|Production={grand:.2f}t|Hours={tot_h:.1f}h|"
+                                 f"SPC_plant={spc:.2f}kWh/t|PowerUsed={kwh:.0f}kWh|"
+                                 f"Cost={cost:.0f}JD|Availability={avail*100:.1f}%|Utilization={util*100:.1f}%")
+            except: pass
+            try:
+                mats = df_sum.iloc[14, :12].tolist(); vals = df_sum.iloc[15, :12].tolist()
+                lines.append("FINAL_STOCK|" + "|".join(
+                    f"{str(m).strip()}={float(v):.1f}t" for m,v in zip(mats,vals)
+                    if pd.notna(m) and pd.notna(v) and str(m) not in ['nan','']))
+            except: pass
+        except Exception as e:
+            logger.warning(f"Summary: {e}")
+
+    # ── Daily sheets — for detailed daily breakdown ────────
+    # NOTE: these may NOT cover all days; gaps = zero/shutdown days
     lines.append("\n--- DAILY DATA (Day|Product|Prod_t|Hours|t/h|SPC_mill|SPC_plant|CK|Blaine|R45|WI) ---")
+    all_sheet_days = sorted([int(s.replace('Daily report','').strip())
+                             for s in xl.sheet_names if s.startswith('Daily report')])
+    max_day = max(all_sheet_days) if all_sheet_days else 31
+    missing_sheets = [d for d in range(1, max_day+1) if d not in all_sheet_days]
+    if missing_sheets:
+        lines.append(f"MISSING_DAILY_SHEETS (no report sheets): {missing_sheets}")
+
     for sheet in sorted([s for s in xl.sheet_names if s.startswith('Daily report')],
                         key=lambda s: int(s.replace('Daily report','').strip())):
         day = int(sheet.replace('Daily report','').strip())
         try:
             df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, header=None)
             headers = df.iloc[0].tolist()
+            day_has_prod = False
             for ci, hdr in enumerate(headers):
                 if hdr not in products: continue
                 pt = safe(df.iloc[1,ci]); hrs = safe(df.iloc[2,ci])
                 if not pt or pt <= 0: continue
+                day_has_prod = True
                 tph = round(pt/hrs,2) if hrs and hrs>0 else '-'
                 vals = [day, hdr, f"{pt:.1f}", f"{hrs:.1f}", tph,
                         safe(df.iloc[3,ci]) or '-', safe(df.iloc[4,ci]) or '-',
                         safe(df.iloc[9,ci]) or '-', safe(df.iloc[11,ci]) or '-',
                         safe(df.iloc[12,ci]) or '-', safe(df.iloc[14,ci]) or '-']
                 lines.append("|".join(str(v) for v in vals))
+            if not day_has_prod:
+                lines.append(f"{day}|ZERO_PRODUCTION|All products = 0t")
         except Exception as e: logger.warning(f"{sheet}: {e}")
 
     # Power sheet

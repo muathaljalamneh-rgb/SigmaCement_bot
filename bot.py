@@ -326,22 +326,36 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc.file_name.endswith('.xlsx'):
         await update.message.reply_text("⚠️ Please send .xlsx file."); return
 
-    await update.message.reply_text("⏳ Processing... please wait.")
+    status_msg = await update.message.reply_text("⏳ Step 1/3: Downloading file...")
     try:
+        # Step 1: Download
         file = await context.bot.get_file(doc.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
         mk = detect_month(doc.file_name)
+
+        # Step 2: Extract (this is the slow part for large files)
+        await status_msg.edit_text("⏳ Step 2/3: Reading all daily sheets + stoppages...")
         structured = extract_structured(file_bytes, doc.file_name)
+
+        # Step 3: Summarize + Save
+        await status_msg.edit_text("⏳ Step 3/3: Generating summary...")
         resp = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=600,
             messages=[{"role":"user","content":
                 f"Summarize in 5 bullet points with exact numbers:\n\n{structured[:8000]}"}])
         summary = resp.content[0].text
         save_report(mk, doc.file_name, structured, summary)
-        await update.message.reply_text(
-            f"✅ Saved: {doc.file_name}\nPeriod: {mk}\n\nSummary:\n{summary}")
+
+        data_size = len(structured)
+        stop_count = structured.count('STOP|')
+        await status_msg.edit_text(
+            f"✅ Saved: {doc.file_name}\n"
+            f"📅 Period: {mk}\n"
+            f"📦 Data: {data_size:,} chars | {stop_count} stoppage events extracted\n\n"
+            f"Summary:\n{summary}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+        logger.error(f"Upload error: {e}")
+        await status_msg.edit_text(f"❌ Error: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id

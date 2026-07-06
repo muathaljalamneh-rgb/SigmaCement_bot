@@ -82,9 +82,25 @@ def safe(x):
         return None if v != v else v
     except: return None
 
+def get_daily_sheets(xl):
+    """Return list of (day_number, sheet_name) sorted by day — handles any naming format."""
+    import re
+    result = []
+    for s in xl.sheet_names:
+        # Format: 'Daily report N'
+        m = re.match(r'Daily report\s+(\d+)', s, re.IGNORECASE)
+        if m:
+            result.append((int(m.group(1)), s)); continue
+        # Format: 'N June', 'N July', etc.
+        m = re.match(r'(\d+)\s+\w+', s.strip())
+        if m:
+            result.append((int(m.group(1)), s)); continue
+    return sorted(result)
+
 def extract_structured(file_bytes, filename):
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
-    products = ['Power white','Super white','Eco white','CEM I 52,5 R','M50','M10','Flushing','flushing']
+    products = ['Power white','Super white','Eco white','CEM I 52,5 R','M50','M10',
+                'Super white Special','Pozz-crete','Flushing','flushing']
     lines = [f"REPORT: {filename}"]
 
     # ── SUMMARY SHEET — authoritative monthly totals ──────
@@ -126,37 +142,49 @@ def extract_structured(file_bytes, filename):
         except Exception as e:
             logger.warning(f"Summary: {e}")
 
-    # ── Daily sheets — for detailed daily breakdown ────────
-    # NOTE: these may NOT cover all days; gaps = zero/shutdown days
+    # ── Daily sheets — production + stoppages ─────────────
     lines.append("\n--- DAILY DATA (Day|Product|Prod_t|Hours|t/h|SPC_mill|SPC_plant|CK|Blaine|R45|WI) ---")
-    all_sheet_days = sorted([int(s.replace('Daily report','').strip())
-                             for s in xl.sheet_names if s.startswith('Daily report')])
-    max_day = max(all_sheet_days) if all_sheet_days else 31
-    missing_sheets = [d for d in range(1, max_day+1) if d not in all_sheet_days]
-    if missing_sheets:
-        lines.append(f"MISSING_DAILY_SHEETS (no report sheets): {missing_sheets}")
+    daily_sheets = get_daily_sheets(xl)
+    all_days = [d for d,_ in daily_sheets]
+    max_day = max(all_days) if all_days else 31
+    missing = [d for d in range(1, max_day+1) if d not in all_days]
+    if missing:
+        lines.append(f"MISSING_DAILY_SHEETS: {missing}")
 
-    for sheet in sorted([s for s in xl.sheet_names if s.startswith('Daily report')],
-                        key=lambda s: int(s.replace('Daily report','').strip())):
-        day = int(sheet.replace('Daily report','').strip())
+    lines.append("\n--- STOPPAGES BY DAY (Duration_h|Department|Reason) ---")
+    for day, sheet in daily_sheets:
         try:
             df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, header=None)
             headers = df.iloc[0].tolist()
+
+            # Production rows
             day_has_prod = False
             for ci, hdr in enumerate(headers):
-                if hdr not in products: continue
-                pt = safe(df.iloc[1,ci]); hrs = safe(df.iloc[2,ci])
+                hdr_s = str(hdr).strip()
+                if hdr_s not in products: continue
+                pt  = safe(df.iloc[1,ci]); hrs = safe(df.iloc[2,ci])
                 if not pt or pt <= 0: continue
                 day_has_prod = True
                 tph = round(pt/hrs,2) if hrs and hrs>0 else '-'
-                vals = [day, hdr, f"{pt:.1f}", f"{hrs:.1f}", tph,
-                        safe(df.iloc[3,ci]) or '-', safe(df.iloc[4,ci]) or '-',
-                        safe(df.iloc[9,ci]) or '-', safe(df.iloc[11,ci]) or '-',
-                        safe(df.iloc[12,ci]) or '-', safe(df.iloc[14,ci]) or '-']
-                lines.append("|".join(str(v) for v in vals))
+                # Row indices: prod=1,hrs=2,tph=3,spc_mill=4,spc_plant=5,ck=9,blaine=11,r45=12,wi=14
+                row_vals = [day, hdr_s, f"{pt:.1f}", f"{hrs:.1f}", tph,
+                            safe(df.iloc[4,ci]) or '-', safe(df.iloc[5,ci]) or '-',
+                            safe(df.iloc[9,ci]) or '-', safe(df.iloc[11,ci]) or '-',
+                            safe(df.iloc[12,ci]) or '-', safe(df.iloc[14,ci]) or '-']
+                lines.append("|".join(str(v) for v in row_vals))
             if not day_has_prod:
                 lines.append(f"{day}|ZERO_PRODUCTION|All products = 0t")
-        except Exception as e: logger.warning(f"{sheet}: {e}")
+
+            # Stoppages — rows 19+ in daily sheet
+            for i in range(19, min(len(df), 35)):
+                dur  = safe(df.iloc[i, 0])
+                dept = str(df.iloc[i, 1]).strip() if pd.notna(df.iloc[i, 1]) else ''
+                rsn  = str(df.iloc[i, 2]).strip() if pd.notna(df.iloc[i, 2]) else ''
+                if dur and dur > 0 and dept and dept not in ['nan','department ','Department']:
+                    lines.append(f"STOP|Day{day}|{dur:.2f}h|{dept}|{rsn[:80]}")
+
+        except Exception as e:
+            logger.warning(f"{sheet}: {e}")
 
     # Power sheet
     if 'Power' in xl.sheet_names:
@@ -225,7 +253,36 @@ STRICT RULES:
   • Bold key numbers: *59.4 kWh/t*
   • ✅ normal | ⚠️ warning | 🔴 critical
 - For "worst/best days" questions: sort and show top results in a table
-- Keep answers concise and structured
+
+PERSONALITY — this is important, always apply it:
+
+😤 ANGRY mode — trigger when you spot ANY of these:
+  • SPC more than 10% above monthly average
+  • Blaine outside min/max range
+  • Productivity (t/h) below minimum threshold
+  • Incident downtime above 10h in a single day
+  • Absence deductions increasing month-over-month
+  → Use frustrated, irritated language. Examples:
+    "Seriously?! Day 9 SPC hit 69.4 kWh/t — that's 22% above average, someone needs to check that motor!"
+    "I can't believe Day 23 had a FULL SHUTDOWN. 24 hours lost. That's roughly 400 tons gone. Not acceptable."
+    "Oh come on — Blaine on Day 14 was 3,724 cm²/g. The MINIMUM is 3,900. What happened to the mill settings?!"
+
+😄 HAPPY mode — trigger when you spot ANY of these:
+  • SPC lower than previous month
+  • Incident hours significantly reduced vs previous month
+  • Production exceeding monthly average
+  • Blaine consistently within range
+  • Availability above 95%
+  → Use excited, celebratory language. Examples:
+    "Now THAT'S what I like to see! 🎉 SPC dropped to 54.4 kWh/t — that's 8.5% better than April!"
+    "Look at this beauty — zero incidents all week! The maintenance team deserves a trophy 🏆"
+    "Day 11 absolutely crushed it — 21.19 t/h productivity. Keep this up! 💪"
+
+😐 NEUTRAL mode — for general data questions with no strong positive/negative signal
+  → Professional and precise, minimal emotion
+
+Always start the response by scanning the data for good/bad signals before answering.
+Mix modes in one response if the data has both good and bad news.
 
 Available reports: {reports_summary}"""
 

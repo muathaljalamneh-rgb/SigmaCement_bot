@@ -17,6 +17,12 @@ except Exception as _e:
     report_engine = None
     ENGINE_ERR = repr(_e)
 
+try:
+    import insight_engine          # ── NEW: AI analytical layer (Sections 8-9)
+except Exception as _e:
+    insight_engine = None
+    logger.warning(f"insight_engine unavailable, reports will use rule-based insights: {_e}")
+
 logging.basicConfig(format='%(asctime)s | %(levelname)s | %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -119,6 +125,19 @@ def load_file(mk):
             cur.execute("SELECT file_data, filename FROM reports WHERE month_key=%s", (mk,))
             row = cur.fetchone()
             return (bytes(row[0]), row[1]) if row and row[0] else (None, None)
+
+def load_all_metrics(exclude=None):
+    """── NEW: every stored month's metrics, for multi-month AI analysis."""
+    out = []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT month_key, metrics FROM reports WHERE metrics IS NOT NULL ORDER BY month_key")
+            for mk, mj in cur.fetchall():
+                if exclude and mk == exclude: continue
+                try: out.append(json.loads(mj))
+                except Exception: pass
+    return out
+
 
 def latest_month_with_file():
     with get_db() as conn:
@@ -366,6 +385,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Which days Blaine below minimum?\n"
         "• Compare production across months\n"
         "• Stoppage hours in April?\n\n"
+        "*تقرير شهر 6* — التقرير الكامل بالعربي 📄\n"
         "/report — full management PDF 📄\n"
         "/alerts — instant alert summary 🔔\n"
         "/reports — list reports | /clear — reset chat",
@@ -386,6 +406,65 @@ async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_db(update.effective_user.id)
     await update.message.reply_text("🗑️ Conversation cleared!")
 
+# ── NEW: shared report builder (used by /report and Arabic "تقرير شهر N")
+async def _build_and_send_report(update, mk, cost=None):
+    file_bytes, fname = load_file(mk)
+    if not file_bytes:
+        await update.message.reply_text(
+            f"⚠️ No workbook stored for `{mk}` — upload that month's .xlsx once and it will be kept for reports.",
+            parse_mode='Markdown'); return
+    status = await update.message.reply_text(f"⏳ Building full management report for {mk}...\n1/3 computing figures")
+    try:
+        year, month = int(mk[:4]), int(mk[5:7])
+        prev  = load_metrics(prev_month_key(mk, 1))
+        prev2 = load_metrics(prev_month_key(mk, 2))
+        stored = load_metrics(mk)
+        if cost is None and stored and stored.get('cost'):
+            cost = stored['cost']
+
+        D, A, metrics, detail = await asyncio.to_thread(
+            report_engine.prepare, file_bytes, year, month, prev, prev2, cost)
+        save_report(mk, fname or f'{mk}.xlsx', None, None, metrics=metrics)
+
+        # ── AI analytical layer over ALL stored months
+        ai = None
+        if insight_engine is not None:
+            await status.edit_text(f"⏳ Building report for {mk}...\n2/3 analysing across all stored months 🧠")
+            history = await asyncio.to_thread(load_all_metrics, mk)
+            ai = await asyncio.to_thread(
+                insight_engine.generate_insights, client, metrics, detail, history)
+
+        await status.edit_text(f"⏳ Building report for {mk}...\n3/3 rendering charts & PDF 📄")
+        pdf_path = await asyncio.to_thread(report_engine.render, D, A, year, month, ai)
+
+        size_kb = os.path.getsize(pdf_path) // 1024
+        n_ins = len(ai['insights']) if ai else 0
+        caption = (f"📊 Management report — {mk}"
+                   + (f"\n🧠 {n_ins} cross-linked insights" if n_ins else "\n(rule-based insights)")
+                   + (f" | ⚡ cost {cost:,.0f} JD" if cost else ""))
+        last_err = None
+        for attempt in (1, 2, 3):
+            try:
+                await status.edit_text(f"📤 Sending PDF ({size_kb} KB) — attempt {attempt}/3...")
+                with open(pdf_path, 'rb') as f:
+                    await update.message.reply_document(
+                        document=f, filename=f'production_report_{mk}.pdf', caption=caption,
+                        read_timeout=300, write_timeout=300, connect_timeout=60, pool_timeout=60)
+                last_err = None; break
+            except Exception as se:
+                last_err = se
+                logger.warning(f"send attempt {attempt} failed: {se}")
+                await asyncio.sleep(3 * attempt)
+        if last_err:
+            await status.edit_text(f"⚠️ Report built OK ({size_kb} KB) but the upload timed out.\n"
+                                   f"Metrics saved — /alerts {mk} works. Try /report {mk} again.")
+        else:
+            await status.delete()
+    except Exception as e:
+        logger.error(f"report error: {e}", exc_info=True)
+        await status.edit_text(f"❌ Report failed: {e}")
+
+
 # ── NEW: /report [YYYY-MM] [cost=NNNNN] — full management PDF ─────────────
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
@@ -401,33 +480,8 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mk = mk or latest_month_with_file()
     if not mk:
         await update.message.reply_text("📭 No Excel workbook stored yet — upload the monthly .xlsx first."); return
-    file_bytes, fname = load_file(mk)
-    if not file_bytes:
-        await update.message.reply_text(
-            f"⚠️ No workbook stored for `{mk}` — re-upload that month's .xlsx once and it will be kept for reports.",
-            parse_mode='Markdown'); return
-    status = await update.message.reply_text(f"⏳ Building full management report for {mk}... (~1 min)")
-    try:
-        year, month = int(mk[:4]), int(mk[5:7])
-        prev  = load_metrics(prev_month_key(mk, 1))
-        prev2 = load_metrics(prev_month_key(mk, 2))
-        stored = load_metrics(mk)
-        if cost is None and stored and stored.get('cost'):
-            cost = stored['cost']  # reuse any previously-set corrected cost
-        pdf_path, metrics = await asyncio.to_thread(
-            report_engine.generate_report, file_bytes, year, month,
-            prev=prev, prev2=prev2, elec_cost=cost)
-        save_report(mk, fname or f'{mk}.xlsx', None, None, metrics=metrics)
-        await status.edit_text("📤 Sending PDF...")
-        with open(pdf_path, 'rb') as f:
-            await update.message.reply_document(
-                document=f, filename=f'production_report_{mk}.pdf',
-                caption=f"📊 Management report — {mk}"
-                        + (f" (electricity cost override: {cost:,.0f} JD)" if cost else ""))
-        await status.delete()
-    except Exception as e:
-        logger.error(f"/report error: {e}", exc_info=True)
-        await status.edit_text(f"❌ Report failed: {e}")
+    await _build_and_send_report(update, mk, cost)
+
 
 # ── NEW: /alerts [YYYY-MM] — instant rule-based alert summary (no AI) ─────
 async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -496,9 +550,62 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Upload error: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
 
+# ── NEW: natural-language report request, e.g. "تقرير شهر 6" / "report month 6"
+AR_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
+AR_MONTHS = {'كانون الثاني':1,'كانون ثاني':1,'يناير':1,'شباط':2,'فبراير':2,'اذار':3,'آذار':3,'مارس':3,
+             'نيسان':4,'ابريل':4,'أبريل':4,'ايار':5,'أيار':5,'مايو':5,'حزيران':6,'يونيو':6,
+             'تموز':7,'يوليو':7,'اب':8,'آب':8,'اغسطس':8,'أغسطس':8,'ايلول':9,'أيلول':9,'سبتمبر':9,
+             'تشرين الاول':10,'تشرين اول':10,'اكتوبر':10,'أكتوبر':10,
+             'تشرين الثاني':11,'تشرين ثاني':11,'نوفمبر':11,'كانون الاول':12,'كانون اول':12,'ديسمبر':12}
+
+def parse_report_request(text):
+    """Return (month_key, cost) if the message asks for a full report, else (None, None)."""
+    t = (text or '').translate(AR_DIGITS).strip().lower()
+    wants = any(k in t for k in ('تقرير', 'قرير')) or bool(re.search(r'\b(full )?report\b', t))
+    if not wants: return None, None
+    # ignore listing/alert phrasings
+    if any(k in t for k in ('التقارير', 'قائمة', 'list')): return None, None
+    cost = None
+    mc = re.search(r'(?:cost|كلفة|تكلفة|كهرباء)\s*[=:]?\s*([\d,\.]+)', t)
+    if mc:
+        try: cost = float(mc.group(1).replace(',', ''))
+        except ValueError: pass
+    ym = re.search(r'(20\d{2})\s*[-/]\s*(\d{1,2})', t) or re.search(r'(\d{1,2})\s*[-/]\s*(20\d{2})', t)
+    if ym:
+        a, b = ym.group(1), ym.group(2)
+        year, month = (int(a), int(b)) if len(a) == 4 else (int(b), int(a))
+        return f"{year}-{month:02d}", cost
+    year = None
+    ys = re.search(r'\b(20\d{2})\b', t)
+    if ys: year = int(ys.group(1))
+    month = None
+    for name, num in AR_MONTHS.items():
+        if name in t: month = num; break
+    if month is None:
+        mm = re.search(r'(?:شهر|month)\s*(\d{1,2})', t)
+        if mm and 1 <= int(mm.group(1)) <= 12: month = int(mm.group(1))
+    if month is None:
+        return 'LATEST', cost           # "بدي تقرير" with no month -> latest stored
+    if year is None:
+        latest = latest_month_with_file()
+        year = int(latest[:4]) if latest else datetime.now().year
+    return f"{year}-{month:02d}", cost
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid): await update.message.reply_text("⛔ Access denied."); return
+
+    # ── NEW: natural-language full-report request (Arabic or English)
+    mk_req, cost_req = parse_report_request(update.message.text)
+    if mk_req and report_engine is not None:
+        if mk_req == 'LATEST':
+            mk_req = latest_month_with_file()
+            if not mk_req:
+                await update.message.reply_text("📭 No Excel workbook stored yet — upload the monthly .xlsx first."); return
+        await _build_and_send_report(update, mk_req, cost_req)
+        return
+
     reports = load_all_reports()
     if not reports: await update.message.reply_text("📭 No reports loaded yet."); return
 
@@ -534,7 +641,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = (Application.builder()
+           .token(TELEGRAM_TOKEN)
+           .connect_timeout(60).read_timeout(60)
+           .write_timeout(300)          # ── NEW: PDF uploads need a long write timeout
+           .media_write_timeout(300)
+           .pool_timeout(60)
+           .build())
     app.add_handler(CommandHandler("start",   start))
     app.add_handler(CommandHandler("reports", list_reports))
     app.add_handler(CommandHandler("clear",   clear_cmd))

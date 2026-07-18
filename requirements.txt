@@ -1,7 +1,7 @@
-python-telegram-bot==21.9
+python-telegram-bot>=21.4,<22
 anthropic>=0.40.0
-psycopg2-binary>=2.9.9
-pandas>=2.1.0
+psycopg2-binary>=2.9.10
+pandas>=2.2.0
 openpyxl>=3.1.2
 numpy>=1.26.0
 matplotlib>=3.8.0

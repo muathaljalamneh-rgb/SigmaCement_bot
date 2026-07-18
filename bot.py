@@ -8,7 +8,14 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import pandas as pd
 
-import report_engine  # ── NEW: deterministic PDF report engine
+# ── NEW: deterministic PDF report engine (guarded — a broken engine must
+# never take the bot down; /report will show the error instead)
+try:
+    import report_engine
+    ENGINE_ERR = None
+except Exception as _e:
+    report_engine = None
+    ENGINE_ERR = repr(_e)
 
 logging.basicConfig(format='%(asctime)s | %(levelname)s | %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,13 +72,16 @@ def init_db():
             cur.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS file_data BYTEA;")
             cur.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS metrics TEXT;")
             # seed April/May metrics if those months have no metrics yet
-            for mk, m in SEED_METRICS.items():
-                cur.execute("""INSERT INTO reports (month_key, filename, metrics, uploaded_at)
-                    VALUES (%s,%s,%s,%s)
-                    ON CONFLICT (month_key) DO UPDATE SET
-                    metrics = COALESCE(reports.metrics, EXCLUDED.metrics)""",
-                    (mk, 'seed (management PDF figures)', json.dumps(m),
-                     datetime.now().strftime("%Y-%m-%d %H:%M")))
+            try:
+                for mk, m in SEED_METRICS.items():
+                    cur.execute("""INSERT INTO reports (month_key, filename, metrics, uploaded_at)
+                        VALUES (%s,%s,%s,%s)
+                        ON CONFLICT (month_key) DO UPDATE SET
+                        metrics = COALESCE(reports.metrics, EXCLUDED.metrics)""",
+                        (mk, 'seed (management PDF figures)', json.dumps(m),
+                         datetime.now().strftime("%Y-%m-%d %H:%M")))
+            except Exception as e:
+                logger.warning(f"seed metrics skipped: {e}")
         conn.commit()
 
 def save_report(mk, fn, structured, summary, file_bytes=None, metrics=None):  # ── NEW args
@@ -380,6 +390,8 @@ async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text("⛔ Access denied."); return
+    if report_engine is None:
+        await update.message.reply_text(f"⚠️ Report engine unavailable:\n{ENGINE_ERR}"); return
     mk, cost = None, None
     for a in context.args or []:
         if re.match(r'^\d{4}-\d{2}$', a): mk = a
@@ -421,6 +433,8 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text("⛔ Access denied."); return
+    if report_engine is None:
+        await update.message.reply_text(f"⚠️ Report engine unavailable:\n{ENGINE_ERR}"); return
     mk = None
     for a in context.args or []:
         if re.match(r'^\d{4}-\d{2}$', a): mk = a
@@ -452,6 +466,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("⏳ Step 3/4: Computing metrics (pools, alerts, recipes)...")
         metrics = None
         try:
+            if report_engine is None: raise RuntimeError(f"engine unavailable: {ENGINE_ERR}")
             year, month = int(mk[:4]), int(mk[5:7])
             prev  = load_metrics(prev_month_key(mk, 1))
             prev2 = load_metrics(prev_month_key(mk, 2))

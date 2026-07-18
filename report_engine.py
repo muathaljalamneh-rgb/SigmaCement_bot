@@ -404,6 +404,76 @@ def make_charts(D, A, ch, year, month):
     ax.set_xlabel('Tons'); ax.set_title(f'Final Raw Material Stock — {calendar.month_name[month]} {year}', fontsize=9)
     plt.tight_layout(); plt.savefig(f'{ch}/stock.png'); plt.close()
 
+
+# --------------------------------------------- RULE-BASED FALLBACK CONTENT ---
+def _rule_insights(D, A, P, PL, prev, wc, gc):
+    """Deterministic insights used when the AI layer is unavailable."""
+    ins = []
+    if A['silofull_h'] > 10:
+        ins.append(('The bottleneck is dispatch, not the mill.',
+                    f"{A['silofull_h']:.1f} h of silos-full stops (~{A['silofull_loss_t']:.0f} t) vs "
+                    f"{A['incident_h']:.1f} h of incidents. Improvement effort returns more on the dispatch chain."))
+    drift = [p for p in P if A['alerts'].get(p, {}).get('bl_low')
+             and len(A['alerts'][p]['bl_low']) >= max(2, len([d for d, r in D['daily'].items() if p in r]) // 3)]
+    if drift:
+        ins.append(('Fineness margin is being consumed.',
+                    'Repeated Blaine-below-min days on: ' + ', '.join(drift) +
+                    '. If SPC gains coincide with falling Blaine, part of the saving is coarser grinding.'))
+    slow = []
+    for p in P:
+        rows_ = {d: r[p] for d, r in D['daily'].items() if p in r}
+        for d, _v in A['alerts'].get(p, {}).get('tph_low', []):
+            if (rows_.get(d, {}).get('hours') or 24) < 12: slow.append((p, d))
+    if slow:
+        ins.append(('Low-productivity days are restart days.',
+                    'Sub-minimum t/h days (' + ', '.join(f'{p} D{d}' for p, d in slow[:6]) +
+                    ') are short runs after stoppages — a restart-frequency problem.'))
+    if wc is not None and wc < WHITE_FLOOR:
+        ins.append(('White clinker coverage is the binding constraint.',
+                    f"White pool at {wc:.1f} months vs {WHITE_FLOOR:.0f}-month floor — procurement lead time now "
+                    f"gates the white portfolio."))
+    tot_ex = sum(rd['excess_t'] for rd in A['recipe_dev'].values())
+    if tot_ex > 5:
+        ins.append(('Stops cost clinker, not just hours.',
+                    f"~{tot_ex:.0f} t of excess clinker traces to unstabilized post-stoppage starts."))
+    if prev:
+        ins.append(('Effective capacity estimate.',
+                    f"Removing dispatch-driven stops lifts the month to ~{PL['prod'] + A['silofull_loss_t']:,.0f} t "
+                    f"(actual {PL['prod']:,.0f} t)."))
+    if not ins:
+        ins.append(('Stable month.', 'No cross-linked anomalies detected by the rule engine.'))
+    return ins
+
+
+def _rule_recs(D, A, P, PL, prev, wc, gc, ws_, wd, gs, gd, bl_drift, tot_excess2, pct, prev_name):
+    recs = [['Priority', 'Recommendation']]
+    if A['silofull_h'] > 10:
+        recs.append(['URGENT', f"Debottleneck packing & dispatch — {A['silofull_h']:.1f} h of silos-full stops "
+                               f"(~{A['silofull_loss_t']:.0f} t)."])
+    if wc is not None and wc < WHITE_FLOOR:
+        recs.append(['URGENT', f"White clinker pool at {wc:.1f} months (< {WHITE_FLOOR:.0f}) — order "
+                               f"~{WHITE_FLOOR*wd-ws_:,.0f} t now."])
+    if gc is not None and gc < GREY_FLOOR + 0.5:
+        recs.append(['HIGH', f"Grey clinker pool at {gc:.1f} months (floor {GREY_FLOOR:.0f}) — schedule replenishment."])
+    if len(A['fan_events']) >= 2:
+        recs.append(['HIGH', f"Process-fan RCA — {len(A['fan_events'])} recurrences "
+                             f"({sum(h for _, h in A['fan_events']):.1f} h)."])
+    for p in bl_drift:
+        recs.append(['HIGH', f"Correct {p} fineness drift — repeated Blaine-below-min days."])
+    if tot_excess2 > 5:
+        recs.append(['MEDIUM', f"Recipe governance — ~{tot_excess2:.0f} t excess clinker on restart transients."])
+    if A.get('packed_gap') and abs(A['packed_gap']) > 20:
+        recs.append(['MEDIUM', f"Investigate {abs(A['packed_gap']):,.0f} t packed-products reconciliation gap."])
+    if D['missing_days']:
+        recs.append(['MEDIUM', f"Recover missing daily sheets: {D['missing_days']}."])
+    if prev and PL['prod'] > (prev['plant'].get('prod') or 0):
+        recs.append(['POSITIVE', f"Production {pct(PL['prod'], prev['plant'].get('prod'))} vs {prev_name} at "
+                                 f"utilization {PL['utilization']*100:.1f}%."])
+    if len(recs) == 1:
+        recs.append(['—', 'No actions triggered by the rule engine this month.'])
+    return recs
+
+
 # -------------------------------------------------------------------- PDF ---
 def _styles():
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -426,7 +496,7 @@ def _styles():
      'ins': st('ins', fontSize=8.8, textColor=DBLUE, leading=11, fontName='Helvetica-Bold'),
     }
 
-def build_pdf(D, A, ch, out_path, year, month):
+def build_pdf(D, A, ch, out_path, year, month, ai=None):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.lib import colors
@@ -517,6 +587,12 @@ def build_pdf(D, A, ch, out_path, year, month):
 
     # ===== 1 EXEC =====
     sec('1', 'Executive Summary')
+    if ai and ai.get('headline'):
+        hb = Table([[Paragraph(f"<b>{ai['headline']}</b>", S['ins'])]], colWidths=[CW])
+        hb.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#eaf1fa')),
+                                ('BOX', (0, 0), (-1, -1), .9, BLUE), ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                                ('TOPPADDING', (0, 0), (-1, -1), 6), ('BOTTOMPADDING', (0, 0), (-1, -1), 6)]))
+        E.append(hb); E.append(Spacer(1, 5))
     kpi([(f"{PL['prod']:,.1f}", 't', 'Total Production', '#164e87'),
          (f"{PL['hours']:.1f}", 'h/month', 'Running Hours', '#1d6f42'),
          (f"{PL['avg_tph']:.2f}", 't/h', 'Avg Mill Productivity', '#b9770e'),
@@ -737,93 +813,62 @@ def build_pdf(D, A, ch, out_path, year, month):
         E.append(PageBreak())
 
     # ===== 8 INSIGHTS =====
-    sec('8', 'Analytical Insights — Cross-Linked Findings')
-    ins = []
-    if A['silofull_h'] > 10:
-        ins.append(('The bottleneck is dispatch, not the mill.',
-                    f"{A['silofull_h']:.1f} h of silos-full stops (~{A['silofull_loss_t']:.0f} t) exceed incident downtime "
-                    f"({A['incident_h']:.1f} h). Improvement effort returns more on the dispatch chain than on the mill."))
-    bl_drift = [p for p in P if A['alerts'].get(p, {}).get('bl_low') and len(A['alerts'][p]['bl_low']) >= max(2, len([d for d, r in D['daily'].items() if p in r]) // 3)]
-    if bl_drift:
-        ins.append(('Fineness margin is being consumed.',
-                    'Products with repeated Blaine-below-min days: ' + ', '.join(bl_drift) +
-                    '. If SPC gains coincide with falling Blaine, part of the energy saving is coarser grinding — a margin that is now exhausted.'))
-    for p, rows_ in [(pp, {d: r[pp] for d, r in D['daily'].items() if pp in r}) for pp in P]:
-        spikes = [(d, v['spc_plant']) for d, v in rows_.items()
-                  if v.get('spc_plant') and P[p].get('spc_plant') and v['spc_plant'] > 1.7 * P[p]['spc_plant'] and (v.get('hours') or 0) < 6]
-        if spikes:
-            ins.append(('Short runs carry a hidden allocation premium.',
-                        f"{p} day(s) {[d for d,_ in spikes]} absorbed plant SPC {'/'.join(f'{v:.0f}' for _, v in spikes)} kWh/t "
-                        f"on short runs during disturbed days. Schedule specialty runs inside high-utilization days."))
-            break
-    slow_short = []
-    for p in P:
-        rows_ = {d: r[p] for d, r in D['daily'].items() if p in r}
-        for d, v in A['alerts'].get(p, {}).get('tph_low', []):
-            if (rows_.get(d, {}).get('hours') or 24) < 12: slow_short.append((p, d))
-    if slow_short:
-        ins.append(('Low-productivity days are restart days.',
-                    f"All/most sub-minimum t/h days ({', '.join(f'{p} D{d}' for p, d in slow_short[:6])}) are short runs after "
-                    f"stoppages — a restart-frequency problem, which loops back to reducing stops."))
-    if wc is not None and wc < WHITE_FLOOR:
-        ins.append(('White clinker coverage is the binding constraint.',
-                    f"White pool at {wc:.1f} months vs {WHITE_FLOOR:.0f}-month floor while white products run at record rates — "
-                    f"procurement lead time now gates the white portfolio."))
+    bl_drift = [p for p in P if A['alerts'].get(p, {}).get('bl_low')
+                and len(A['alerts'][p]['bl_low']) >= max(2, len([d for d, r in D['daily'].items() if p in r]) // 3)]
     tot_excess2 = sum(rd['excess_t'] for rd in A['recipe_dev'].values())
-    if tot_excess2 > 5:
-        ins.append(('Stops cost clinker, not just hours.',
-                    f"~{tot_excess2:.0f} t of excess clinker traces to unstabilized post-stoppage starts — every avoided restart "
-                    f"saves both downtime and the most expensive raw material."))
-    if prev:
-        cap = PL['prod'] + A['silofull_loss_t']
-        ins.append(('Effective capacity estimate.',
-                    f"Removing dispatch-driven stops alone lifts the month to ~{cap:,.0f} t at current rates "
-                    f"(actual {PL['prod']:,.0f} t)."))
-    if not ins:
-        ins.append(('Stable month.', 'No cross-linked anomalies detected by the rule engine this month.'))
-    for i, (t, b) in enumerate(ins, 1):
-        E.append(Paragraph(f'{i}. {t}', S['ins'])); E.append(Paragraph(b, S['body'])); E.append(Spacer(1, 4.5))
+    sec('8', 'Analytical Insights — Cross-Linked Findings')
+    if ai and ai.get('insights'):
+        E.append(Paragraph('Findings produced by linking the daily stoppage log, power register, stock and silo '
+                           'movements, recipe ratios and quality data across all available months.', S['body']))
+        E.append(Spacer(1, 4))
+        for i, item in enumerate(ai['insights'], 1):
+            E.append(Paragraph(f"{i}. {item['title']}", S['ins']))
+            E.append(Paragraph(item['body'], S['body']))
+            E.append(Spacer(1, 4.5))
+    else:
+        ins = _rule_insights(D, A, P, PL, prev, wc, gc)
+        for i, (t, b) in enumerate(ins, 1):
+            E.append(Paragraph(f'{i}. {t}', S['ins'])); E.append(Paragraph(b, S['body'])); E.append(Spacer(1, 4.5))
     E.append(PageBreak())
 
     # ===== 9 RECOMMENDATIONS =====
     sec('9', 'Priority Recommendations')
-    recs = [['Priority', 'Recommendation']]
-    if A['silofull_h'] > 10:
-        recs.append(['URGENT', f"Debottleneck packing & dispatch — {A['silofull_h']:.1f} h of silos-full stops (~{A['silofull_loss_t']:.0f} t)."])
-    if wc is not None and wc < WHITE_FLOOR:
-        recs.append(['URGENT', f"White clinker pool at {wc:.1f} months (< {WHITE_FLOOR:.0f}) — order ~{WHITE_FLOOR*wd-ws_:,.0f} t now."])
-    if gc is not None and gc < GREY_FLOOR + 0.5:
-        recs.append(['HIGH', f"Grey clinker pool at {gc:.1f} months (floor {GREY_FLOOR:.0f}) — schedule replenishment."])
-    if len(A['fan_events']) >= 2:
-        recs.append(['HIGH', f"Process-fan RCA — {len(A['fan_events'])} recurrences ({sum(h for _, h in A['fan_events']):.1f} h)."])
-    for p in bl_drift:
-        recs.append(['HIGH', f"Correct {p} fineness drift — repeated Blaine-below-min days; budget the SPC cost of restoring spec."])
-    if tot_excess2 > 5:
-        recs.append(['MEDIUM', f"Recipe governance — ~{tot_excess2:.0f} t excess clinker on restart transients; stabilize feeders before counting production."])
-    if A.get('packed_gap') and abs(A['packed_gap']) > 20:
-        recs.append(['MEDIUM', f"Investigate {abs(A['packed_gap']):,.0f} t packed-products reconciliation gap (M50 bulk excluded)."])
-    if D['missing_days']:
-        recs.append(['MEDIUM', f"Recover missing daily sheets: {D['missing_days']}."])
-    if prev and PL['prod'] > (prev['plant'].get('prod') or 0):
-        recs.append(['POSITIVE', f"Production {pct(PL['prod'], prev['plant'].get('prod'))} vs {prev_name} at utilization {PL['utilization']*100:.1f}%."])
-    if len(recs) == 1:
-        recs.append(['—', 'No actions triggered by the rule engine this month.'])
+    if ai and ai.get('recommendations'):
+        order = {'URGENT': 0, 'HIGH': 1, 'MEDIUM': 2, 'MONITOR': 3, 'POSITIVE': 4}
+        rr = sorted(ai['recommendations'], key=lambda r: order.get(str(r.get('priority', '')).upper(), 9))
+        recs = [['Priority', 'Recommendation']] + [[str(r.get('priority', '—')).upper(), r['text']] for r in rr]
+    else:
+        recs = _rule_recs(D, A, P, PL, prev, wc, gc, ws_, wd, gs, gd, bl_drift, tot_excess2, pct, prev_name)
     tbl(recs, colw=[22 * mm, 160 * mm], fs=7.0, align='LEFT')
-    E.append(Paragraph(f'Auto-generated {datetime.now():%Y-%m-%d %H:%M} by SigmaCement_bot report engine. All figures from the '
-                       f'Summary sheet; naming maps and house rules applied.', S['small']))
+    E.append(Paragraph(f'Auto-generated {datetime.now():%Y-%m-%d %H:%M} by SigmaCement_bot. All figures computed '
+                       f'deterministically from the Summary sheet (house rules and naming maps applied); '
+                       f'Sections 8-9 written by the analytical layer from those figures'
+                       + ('.' if ai else ' (rule-based fallback — AI layer unavailable).'), S['small']))
     doc.build(E)
 
 # ------------------------------------------------------------- ENTRYPOINT ---
-def generate_report(file_bytes, year, month, prev=None, prev2=None, elec_cost=None, out_dir=None):
-    """Returns (pdf_path, metrics_dict). prev/prev2 = metrics dicts of earlier months."""
+def prepare(file_bytes, year, month, prev=None, prev2=None, elec_cost=None):
+    """Extract + analyze only. Returns (D, A, metrics, detail) for the AI layer."""
     D = extract(file_bytes)
     A = analyze(D, year, month, prev=prev, prev2=prev2, elec_cost=elec_cost)
+    return D, A, metrics_json(D, A, year, month), detail_pack(D, A)
+
+
+def render(D, A, year, month, ai=None, out_dir=None):
+    """Build charts + PDF. `ai` = dict from insight_engine (or None -> rule-based)."""
     tmp = out_dir or tempfile.mkdtemp(prefix='sigma_report_')
     ch = os.path.join(tmp, 'charts'); os.makedirs(ch, exist_ok=True)
     make_charts(D, A, ch, year, month)
     out = os.path.join(tmp, f'production_report_{year}-{month:02d}.pdf')
-    build_pdf(D, A, ch, out, year, month)
-    return out, metrics_json(D, A, year, month)
+    build_pdf(D, A, ch, out, year, month, ai=ai)
+    return out
+
+
+def generate_report(file_bytes, year, month, prev=None, prev2=None, elec_cost=None,
+                    out_dir=None, ai=None):
+    """Returns (pdf_path, metrics_dict). prev/prev2 = metrics dicts of earlier months."""
+    D, A, metrics, _detail = prepare(file_bytes, year, month, prev, prev2, elec_cost)
+    return render(D, A, year, month, ai=ai, out_dir=out_dir), metrics
 
 def quick_alerts_text(m):
     """Format a metrics dict as a compact Telegram alert message (no AI)."""
@@ -840,6 +885,41 @@ def quick_alerts_text(m):
     if m.get('missing_days'): L.append(f"🟠 Missing daily sheets: {m['missing_days']}")
     if len(L) == 2: L.append('✅ No active alerts — clean month.')
     return '\n'.join(L)
+
+def detail_pack(D, A):
+    """Day-level evidence for the AI analytical layer (numbers only, no prose)."""
+    daily_tot = {d: round(sum((r[p]['prod'] or 0) for p in r), 1) for d, r in D['daily'].items()}
+    dp = {}
+    for p in LIMITS:
+        rows = {d: r[p] for d, r in D['daily'].items() if p in r}
+        if not rows: continue
+        dp[p] = {str(d): {k: (round(v, 3) if isinstance(v, float) else v)
+                          for k, v in rows[d].items() if v is not None}
+                 for d in sorted(rows)}
+    return {
+        'daily_totals': daily_tot,
+        'fridays': A['fridays'],
+        'zero_days': D['zero_days'],
+        'missing_daily_sheets': D['missing_days'],
+        'stoppage_log': [{'day': s['day'], 'hours': s['hours'], 'dept': s['dept'],
+                          'reason': s['reason'], 'category': categorize(s)} for s in D['stoppages']],
+        'stoppage_by_category': A['stop_cats'],
+        'silofull_events': A['silofull_events'],
+        'fan_events': A['fan_events'],
+        'pi_planned_by_day': D['pi'].get('planned', {}),
+        'pi_incident_by_day': D['pi'].get('incident', {}),
+        'daily_products': dp,
+        'stock_movements': A['stock'],
+        'silo_levels': A.get('silo_recon'),
+        'packing_by_product': A.get('packing'),
+        'm50_bulk_outflow_t': A.get('m50_bulk'),
+        'packed_products_unaccounted_t': A.get('packed_gap'),
+        'recipe_norms_pct': A['recipe_norm'],
+        'recipe_deviations': A['recipe_dev'],
+        'product_thresholds': {p: {'tph_min': v[0], 'blaine_min': v[1], 'blaine_max': v[2]}
+                               for p, v in LIMITS.items()},
+    }
+
 
 def compute_metrics(file_bytes, year, month, prev=None, prev2=None, elec_cost=None):
     """Lightweight: extraction + analytics only (no charts/PDF). Used at upload time."""

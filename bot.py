@@ -477,9 +477,14 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif a.lower().startswith('cost='):
             try: cost = float(a.split('=', 1)[1].replace(',', ''))
             except ValueError: pass
+    explicit = mk is not None
     mk = mk or latest_month_with_file()
     if not mk:
         await update.message.reply_text("📭 No Excel workbook stored yet — upload the monthly .xlsx first."); return
+    if not explicit:
+        await update.message.reply_text(
+            f"ℹ️ No month specified — generating the LATEST stored month: *{mk}*.\n"
+            f"For a specific month send: `تقرير شهر N`", parse_mode='Markdown')
     await _build_and_send_report(update, mk, cost)
 
 
@@ -513,6 +518,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = bytes(await file.download_as_bytearray())
         mk = detect_month(doc.file_name)
 
+        # ── NEW: the workbook's own dates are authoritative over the filename
+        mk_note = ""
+        if report_engine is not None:
+            cm = await asyncio.to_thread(report_engine.detect_content_month, file_bytes)
+            if cm:
+                mk_content = f"{cm[0]}-{cm[1]:02d}"
+                if mk_content != mk:
+                    mk_note = (f"\n⚠️ Filename suggested {mk} but the workbook's internal dates are "
+                               f"{mk_content} — saved under {mk_content} (content wins).")
+                    mk = mk_content
+        old_file, old_name = load_file(mk)
+        if old_file and old_name and old_name != doc.file_name:
+            mk_note += f"\nℹ️ Replaced previously stored file for {mk}: {old_name}"
+
         await status_msg.edit_text("⏳ Step 2/4: Reading all daily sheets + stoppages...")
         structured = extract_structured(file_bytes, doc.file_name)
 
@@ -540,12 +559,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         data_size = len(structured)
         stop_count = structured.count('STOP|')
+        month_num = int(mk[5:7])
         await status_msg.edit_text(
             f"✅ Saved: {doc.file_name}\n"
-            f"📅 Period: {mk}\n"
+            f"📅 Period: *{mk}*{mk_note}\n"
             f"📦 Data: {data_size:,} chars | {stop_count} stoppage events extracted\n\n"
             f"Summary:\n{summary}\n\n"
-            f"📄 /report {mk} — full PDF | 🔔 /alerts {mk}")
+            f"📄 For the full PDF, send:  `تقرير شهر {month_num}`",
+            parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Upload error: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
@@ -603,6 +624,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mk_req = latest_month_with_file()
             if not mk_req:
                 await update.message.reply_text("📭 No Excel workbook stored yet — upload the monthly .xlsx first."); return
+            await update.message.reply_text(
+                f"ℹ️ No month specified — generating the LATEST stored month: *{mk_req}*.\n"
+                f"For a specific month send: `تقرير شهر N`", parse_mode='Markdown')
         await _build_and_send_report(update, mk_req, cost_req)
         return
 

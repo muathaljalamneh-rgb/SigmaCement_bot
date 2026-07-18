@@ -562,11 +562,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         month_num = int(mk[5:7])
         await status_msg.edit_text(
             f"✅ Saved: {doc.file_name}\n"
-            f"📅 Period: *{mk}*{mk_note}\n"
+            f"📅 Period: {mk}{mk_note}\n"
             f"📦 Data: {data_size:,} chars | {stop_count} stoppage events extracted\n\n"
             f"Summary:\n{summary}\n\n"
-            f"📄 For the full PDF, send:  `تقرير شهر {month_num}`",
-            parse_mode='Markdown')
+            f"📄 For the full PDF, send:  تقرير شهر {month_num}")
     except Exception as e:
         logger.error(f"Upload error: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")

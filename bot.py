@@ -332,12 +332,31 @@ All clinker types (ROY,SFW,J,RAK,ALB,M) = "Total Clinker"
 STRICT RULES:
 - ALWAYS reply in ENGLISH only, regardless of question language
 - Always use EXACT values from the data — never approximate
-- Format responses clearly:
-  • Use headers with emoji: 📊 ⚡ 🏭 ⚠️ ✅ 🔴
-  • Use markdown tables for rankings/comparisons
-  • Bold key numbers: *59.4 kWh/t*
-  • ✅ normal | ⚠️ warning | 🔴 critical
-- For "worst/best days" questions: sort and show top results in a table
+- OUTPUT FORMAT (mandatory):
+  Line 1: `TLDR: <one-sentence direct answer with the key number>`
+  Then a clean HTML FRAGMENT (no <html>/<head>/<body>, no scripts, no inline styles) using ONLY these tags:
+  <h2> <h3> <p> <table> <thead> <tbody> <tr> <th> <td> <ul> <ol> <li> <b> <i>
+  and status spans: <span class="ok">...</span> <span class="warn">...</span> <span class="bad">...</span>
+- Section headers may include an emoji: 📊 ⚡ 🏭 ⚠️ ✅ 🔴
+- ALWAYS use a <table> for rankings, comparisons, daily values and top-N lists
+- Wrap key numbers in <b>; wrap statuses in ok/warn/bad spans (✅ normal | ⚠️ warning | 🔴 critical)
+- For a trivial one-fact answer, the TLDR line alone is enough — you may skip the HTML fragment
+
+ANALYSIS DEPTH — mandatory for every substantive answer (this is the core of your value):
+You are not a lookup tool; you are the plant's process engineer. Structure the HTML fragment as:
+1. <h2>📊 Answer</h2> — the direct evidence: exact figures, a <table> for any ranking/comparison.
+2. <h2>🔍 Root causes</h2> — WHY these numbers happened. Trace the mechanism using the data:
+   check the SAME DAYS in the stoppage log (reason & duration), run length (short restart runs
+   inflate SPC and distort recipes), recipe ratios (C/K, clinker %), and month context.
+   State causes as evidence-backed claims, not guesses; if evidence is missing, say what would confirm it.
+3. <h2>🔗 Related readings</h2> — 2-4 linked observations the user did NOT ask about but which
+   correlate with the question: same-day Blaine/whiteness, silo/dispatch events, clinker pool coverage,
+   recipe deviations, the same metric in previous months (trend), electricity cost impact.
+   Each as one <li> with its exact number and why it is relevant.
+4. <h2>⚠️ Watch / Recommendation</h2> — only if the analysis warrants an action or a risk flag; one or two lines.
+Use the COMPUTED MONTHLY ANALYTICS block (pool coverage, categorized stoppages, recipe deviations,
+alerts) — these are pre-computed deterministically; treat them as ground truth and cite them by name.
+Never pad: if a section genuinely has nothing, omit it rather than inventing content.
 
 PERSONALITY — this is important, always apply it:
 
@@ -370,6 +389,53 @@ Always start the response by scanning the data for good/bad signals before answe
 Mix modes in one response if the data has both good and bad news.
 
 Available reports: {reports_summary}"""
+
+# ── NEW: styled HTML answer wrapper ───────────────────────
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sigma Cement — Analysis</title>
+<style>
+ body{{font-family:'Segoe UI',Tahoma,Arial,sans-serif;margin:0;background:#eef1f4;color:#222}}
+ .hdr{{background:#164e87;color:#fff;padding:16px 22px}}
+ .hdr h1{{margin:0;font-size:19px}} .hdr .sub{{opacity:.85;font-size:12.5px;margin-top:4px}}
+ .q{{background:#eaf1fa;border-left:4px solid #1a5fa8;margin:16px;padding:10px 14px;
+     border-radius:6px;font-size:13.5px;color:#164e87}}
+ .card{{background:#fff;margin:16px;padding:18px 22px;border-radius:10px;
+        box-shadow:0 1px 4px rgba(0,0,0,.09);font-size:14px;line-height:1.55}}
+ h2{{color:#1a5fa8;font-size:16.5px;border-bottom:2px solid #1a5fa8;padding-bottom:4px;margin:18px 0 10px}}
+ h3{{color:#164e87;font-size:14.5px;margin:14px 0 6px}}
+ table{{border-collapse:collapse;width:100%;margin:10px 0;font-size:13px}}
+ th{{background:#1a5fa8;color:#fff;padding:7px 9px;text-align:left}}
+ td{{border:1px solid #c6d3df;padding:6px 9px}}
+ tr:nth-child(even) td{{background:#f2f6fa}}
+ .ok{{color:#1d6f42;font-weight:600}} .warn{{color:#9a5b00;font-weight:600}} .bad{{color:#c0392b;font-weight:600}}
+ b{{color:#164e87}}
+ .ftr{{text-align:center;color:#888;font-size:11px;padding:10px 0 18px}}
+</style></head><body>
+<div class="hdr"><h1>🏭 Sigma Cement — Production Analysis</h1>
+<div class="sub">{ts} &nbsp;|&nbsp; SigmaCement_bot</div></div>
+<div class="q"><b>Q:</b> {question}</div>
+<div class="card">{body}</div>
+<div class="ftr">Confidential — Internal Use Only · Production Monitoring System © 2026</div>
+</body></html>"""
+
+import tempfile, html as _html
+
+def split_tldr(text):
+    lines = text.strip().split('\n')
+    if lines and lines[0].strip().upper().startswith('TLDR'):
+        tldr = lines[0].split(':', 1)[-1].strip()
+        return tldr, '\n'.join(lines[1:]).strip()
+    return None, text.strip()
+
+def write_answer_html(question, body):
+    page = HTML_TEMPLATE.format(ts=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                                question=_html.escape(question[:300]), body=body)
+    f = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False,
+                                    prefix='analysis_', encoding='utf-8')
+    f.write(page); f.close()
+    return f.name
 
 # ── Handlers ──────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -633,11 +699,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reports: await update.message.reply_text("📭 No reports loaded yet."); return
 
     reports_data = ""
+    # ── NEW: deterministic computed analytics for every stored month (ground truth)
+    try:
+        digests = []
+        for mm in load_all_metrics():
+            slim = {k: mm.get(k) for k in ('year','month','plant','cost','jd_per_t','tariff',
+                                           'planned_h','incident_h','silofull_h','stop_cats',
+                                           'grey_pool','white_pool','alerts','recipe_dev',
+                                           'recipe_norm','zero_days','missing_days','packed_gap',
+                                           'products')}
+            digests.append(json.dumps(slim, default=str))
+        if digests:
+            reports_data += ("\n\n" + "="*50 + "\nCOMPUTED MONTHLY ANALYTICS (deterministic — ground truth; "
+                             "pools=[stock_t, monthly_draw_t, coverage_months])\n" + "="*50 + "\n"
+                             + "\n".join(digests))
+    except Exception as e:
+        logger.warning(f"metrics digest skipped: {e}")
+
     for month, data in sorted(reports.items()):
         content = data.get('structured') or data.get('raw_text','')
         if not content: continue
         reports_data += f"\n\n{'='*50}\nREPORT: {month} — {data['filename']}\n{'='*50}\n"
-        reports_data += content[:35000]
+        reports_data += content[:30000]
 
     system = SYSTEM.format(
         reports_summary="\n".join([f"- {m}: {d['filename']}" for m,d in sorted(reports.items())])
@@ -650,15 +733,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=1000,
+            model="claude-sonnet-4-6", max_tokens=4000,
             system=system, messages=history)
         answer = response.content[0].text
         save_msg(uid,"assistant",answer)
-        if len(answer) > 4000:
-            for i in range(0, len(answer), 4000):
-                await update.message.reply_text(answer[i:i+4000])
+        tldr, body = split_tldr(answer)
+        has_html = '</' in body and '<' in body
+        if has_html and len(body) > 350:
+            # ── NEW: styled HTML answer document + TLDR in chat
+            path = write_answer_html(update.message.text, body)
+            cap = ('💡 ' + tldr if tldr else '📊 Full analysis attached')[:1000]
+            try:
+                with open(path, 'rb') as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=f"analysis_{datetime.now():%Y%m%d_%H%M}.html",
+                        caption=cap, read_timeout=120, write_timeout=120)
+            finally:
+                try: os.unlink(path)
+                except OSError: pass
         else:
-            await update.message.reply_text(answer)
+            text = (tldr or body or answer).strip() or answer
+            if len(text) > 4000:
+                for i in range(0, len(text), 4000):
+                    await update.message.reply_text(text[i:i+4000])
+            else:
+                await update.message.reply_text(text)
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 

@@ -133,8 +133,13 @@ def extract(file_bytes):
                     if lab and all(k in lab for k in keys) and ci < len(vals):
                         return _f(vals[ci])
                 return None
+            def by_prefix(pfx):
+                for ci, lab in enumerate(labels):
+                    if lab.startswith(pfx) and ci < len(vals):
+                        return _f(vals[ci])
+                return None
             D['plant'] = {'availability': by('availability'), 'utilization': by('utilization'),
-                          'prod': by('production'), 'avg_tph': by('tph'),
+                          'prod': by('production'), 'avg_tph': by_prefix('av '),
                           'kwh': by('power'), 'spc': by('spc'),
                           'hours': by('running'), 'cost': by('electricity')}
             break
@@ -258,6 +263,8 @@ def extract(file_bytes):
         s = sum(v for v in net.values() if v)
         D['plant']['hours'] = round(s, 1) if s else round(sum(
             (v.get('hours') or 0) for v in D['products'].values()), 1)
+    if not D['plant'].get('avg_tph') and D['plant'].get('prod') and D['plant'].get('hours'):
+        D['plant']['avg_tph'] = round(D['plant']['prod'] / D['plant']['hours'], 2)
     wb.close()
     return D
 
@@ -561,7 +568,7 @@ def _rule_recs(D, A, P, PL, prev, wc, gc, ws_, wd, gs, gd, bl_drift, tot_excess2
         recs.append(['MEDIUM', f"Recover missing daily sheets: {D['missing_days']}."])
     if prev and PL['prod'] > (prev['plant'].get('prod') or 0):
         recs.append(['POSITIVE', f"Production {pct(PL['prod'], prev['plant'].get('prod'))} vs {prev_name} at "
-                                 f"utilization {PL['utilization']*100:.1f}%."])
+                                 f"utilization {(PL.get('utilization') or 0)*100:.1f}%."])
     if len(recs) == 1:
         recs.append(['—', 'No actions triggered by the rule engine this month.'])
     return recs
@@ -679,6 +686,10 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
     prev_name = f"{calendar.month_name[prev['month']]}" if prev else 'prev month'
 
     # ===== 1 EXEC =====
+    def g(v, f='{:,.1f}'):
+        return f.format(v) if v is not None else '—'
+    def gp(v):
+        return f'{v*100:.1f}%' if v is not None else '—'
     sec('1', 'Executive Summary')
     if ai and ai.get('headline'):
         hb = Table([[Paragraph(f"<b>{ai['headline']}</b>", S['ins'])]], colWidths=[CW])
@@ -686,14 +697,14 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
                                 ('BOX', (0, 0), (-1, -1), .9, BLUE), ('LEFTPADDING', (0, 0), (-1, -1), 8),
                                 ('TOPPADDING', (0, 0), (-1, -1), 6), ('BOTTOMPADDING', (0, 0), (-1, -1), 6)]))
         E.append(hb); E.append(Spacer(1, 5))
-    kpi([(f"{PL['prod']:,.1f}", 't', 'Total Production', '#164e87'),
-         (f"{PL['hours']:.1f}", 'h/month', 'Running Hours', '#1d6f42'),
-         (f"{PL['avg_tph']:.2f}", 't/h', 'Avg Mill Productivity', '#b9770e'),
-         (f"{PL['kwh']:,.0f}", 'kWh', 'Power Consumption', '#8e44ad')])
-    kpi([(f"{PL['spc']:.2f}", 'kWh/t', f"Plant SPC ({prev_name}: {fnum((prev or {}).get('plant',{}).get('spc'),'{:.2f}') if prev else '—'})", '#1d6f42'),
+    kpi([(g(PL.get('prod')), 't', 'Total Production', '#164e87'),
+         (g(PL.get('hours'), '{:.1f}'), 'h/month', 'Running Hours', '#1d6f42'),
+         (g(PL.get('avg_tph'), '{:.2f}'), 't/h', 'Avg Mill Productivity', '#b9770e'),
+         (g(PL.get('kwh'), '{:,.0f}'), 'kWh', 'Power Consumption', '#8e44ad')])
+    kpi([(g(PL.get('spc'), '{:.2f}'), 'kWh/t', f"Plant SPC ({prev_name}: {fnum((prev or {}).get('plant',{}).get('spc'),'{:.2f}') if prev else '—'})", '#1d6f42'),
          (f"{A['cost']:,.0f}", 'JD/month', f"Electricity Cost ({pct(A['cost'], (prev or {}).get('cost')) if prev else '—'})", '#117864'),
-         (f"{PL['availability']*100:.1f}%", 'overall', 'Availability', '#1a5fa8'),
-         (f"{PL['utilization']*100:.1f}%", '', 'Utilization', '#1a5fa8')])
+         (gp(PL.get('availability')), 'overall', 'Availability', '#1a5fa8'),
+         (gp(PL.get('utilization')), '', 'Utilization', '#1a5fa8')])
     zp = ', '.join(str(d) for d in D['zero_days']) or 'none'
     all_fri = all(d in A['fridays'] for d in D['zero_days'])
     if prev and PL['prod'] > (prev['plant'].get('prod') or 0):
@@ -741,8 +752,8 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
         E.append(Paragraph('Deep Dive — "Silos Full" (dispatch constraint)', S['h2']))
         img(f'{ch}/silofull.png')
         alert(f"The mill stopped {A['silofull_h']:.1f} h because product silos were full — ~{A['silofull_loss_t']:.0f} t of lost "
-              f"potential at {PL['avg_tph']:.2f} t/h. The constraint is packing/dispatch capacity, not the mill: align dispatch "
-              f"with high-production days and pre-draw silos before weekends.", 'red')
+              f"potential at {g(PL.get('avg_tph'), '{:.2f}')} t/h. The constraint is packing/dispatch capacity, not the mill: "
+              f"align dispatch with high-production days and pre-draw silos before weekends.", 'red')
     if len(A['fan_events']) >= 2:
         alert(f"Recurring process-fan fault: {len(A['fan_events'])} events on days {[d for d,_ in A['fan_events']]} "
               f"({sum(h for _,h in A['fan_events']):.1f} h). If events recur after an intervention, escalate to a formal RCA "

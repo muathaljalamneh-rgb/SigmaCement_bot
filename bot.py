@@ -1,4 +1,4 @@
-import os, io, logging, re
+import os, io, logging, re, json, asyncio
 from datetime import datetime
 
 import anthropic
@@ -7,6 +7,8 @@ from psycopg2.extras import RealDictCursor
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import pandas as pd
+
+import report_engine  # ── NEW: deterministic PDF report engine
 
 logging.basicConfig(format='%(asctime)s | %(levelname)s | %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,6 +20,29 @@ ADMIN_USER_ID  = int(os.environ.get("ADMIN_USER_ID","0"))
 DATABASE_URL   = os.environ.get("DATABASE_URL","")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+# ── NEW: seed metrics so month-on-month comparisons work from day one ─────
+SEED_METRICS = {
+ "2026-05": {"year":2026,"month":5,"cost":35893,"jd_per_t":4.330,"tariff":0.0796,
+  "plant":{"prod":8289.3,"spc":54.37,"hours":407.2,"utilization":0.784,"availability":0.992,"kwh":450708,"avg_tph":19.79},
+  "incident_h":4.6,"planned_h":140.3,"silofull_h":0,"alerts":{},"recipe_dev":{},"recipe_norm":{},
+  "grey_pool":[39836,0,None],"white_pool":[13344,0,None],"stock":{},"zero_days":[8,15],"missing_days":[22],
+  "products":{"Power white":{"prod":634.5,"tph":20.47,"spc_plant":51.60,"blaine":4069,"wi":91.5,"clinker":0.860},
+   "Super white":{"prod":1800.7,"tph":21.26,"spc_plant":50.27,"blaine":4616,"wi":92.9,"clinker":0.704},
+   "Eco white":{"prod":551.0,"tph":22.05,"spc_plant":50.68,"blaine":4940,"wi":93.9,"clinker":0.583},
+   "CEM I 52.5R":{"prod":98.8,"tph":19.77,"spc_plant":52.72,"blaine":3737,"wi":91.2,"clinker":0.92},
+   "M50":{"prod":5060.7,"tph":19.88,"spc_plant":55.81,"blaine":3983,"clinker":0.825},
+   "M10":{"prod":143.6,"tph":20.52,"spc_plant":65.23,"blaine":4316}}},
+ "2026-04": {"year":2026,"month":4,"cost":46818,"jd_per_t":4.733,"tariff":0.0796,
+  "plant":{"prod":9892,"spc":59.42,"utilization":0.698,"availability":0.848},
+  "incident_h":90.2,"planned_h":None,"silofull_h":0,"alerts":{},"recipe_dev":{},"recipe_norm":{},
+  "grey_pool":[42122,0,None],"white_pool":[15894,0,None],"stock":{},"zero_days":[],"missing_days":[],
+  "products":{"Power white":{"prod":1254.0,"tph":20.50,"spc_plant":57.20,"blaine":4082,"wi":91.9},
+   "Super white":{"prod":2154.5,"tph":20.72,"spc_plant":57.60,"blaine":4693,"wi":93.2},
+   "Eco white":{"prod":312.4,"tph":21.77,"spc_plant":57.20,"blaine":5154,"wi":93.9},
+   "CEM I 52.5R":{"prod":126.1,"tph":20.16,"spc_plant":57.20,"blaine":4066,"wi":91.7},
+   "M50":{"prod":6045.7,"tph":19.97,"spc_plant":61.70,"blaine":4063}}},
+}
 
 # ── DB ────────────────────────────────────────────────────
 def get_db(): return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -36,24 +61,67 @@ def init_db():
                 );
             """)
             cur.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS structured TEXT;")
+            # ── NEW: raw workbook + computed metrics for /report and /alerts
+            cur.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS file_data BYTEA;")
+            cur.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS metrics TEXT;")
+            # seed April/May metrics if those months have no metrics yet
+            for mk, m in SEED_METRICS.items():
+                cur.execute("""INSERT INTO reports (month_key, filename, metrics, uploaded_at)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT (month_key) DO UPDATE SET
+                    metrics = COALESCE(reports.metrics, EXCLUDED.metrics)""",
+                    (mk, 'seed (management PDF figures)', json.dumps(m),
+                     datetime.now().strftime("%Y-%m-%d %H:%M")))
         conn.commit()
 
-def save_report(mk, fn, structured, summary):
+def save_report(mk, fn, structured, summary, file_bytes=None, metrics=None):  # ── NEW args
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""INSERT INTO reports (month_key,filename,structured,summary,uploaded_at)
-                VALUES (%s,%s,%s,%s,%s)
+            cur.execute("""INSERT INTO reports (month_key,filename,structured,summary,uploaded_at,file_data,metrics)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (month_key) DO UPDATE SET
                 filename=EXCLUDED.filename, structured=EXCLUDED.structured,
-                summary=EXCLUDED.summary, uploaded_at=EXCLUDED.uploaded_at""",
-                (mk, fn, structured, summary, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                summary=EXCLUDED.summary, uploaded_at=EXCLUDED.uploaded_at,
+                file_data=COALESCE(EXCLUDED.file_data, reports.file_data),
+                metrics=COALESCE(EXCLUDED.metrics, reports.metrics)""",
+                (mk, fn, structured, summary, datetime.now().strftime("%Y-%m-%d %H:%M"),
+                 psycopg2.Binary(file_bytes) if file_bytes else None,
+                 json.dumps(metrics) if metrics else None))
         conn.commit()
 
 def load_all_reports():
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM reports ORDER BY month_key")
+            cur.execute("SELECT month_key,filename,structured,raw_text,summary,uploaded_at FROM reports ORDER BY month_key")
             return {r['month_key']: dict(r) for r in cur.fetchall()}
+
+# ── NEW: metrics / file loaders ───────────────────────────
+def load_metrics(mk):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT metrics FROM reports WHERE month_key=%s", (mk,))
+            row = cur.fetchone()
+            return json.loads(row[0]) if row and row[0] else None
+
+def load_file(mk):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT file_data, filename FROM reports WHERE month_key=%s", (mk,))
+            row = cur.fetchone()
+            return (bytes(row[0]), row[1]) if row and row[0] else (None, None)
+
+def latest_month_with_file():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT month_key FROM reports WHERE file_data IS NOT NULL ORDER BY month_key DESC LIMIT 1")
+            row = cur.fetchone()
+            return row[0] if row else None
+
+def prev_month_key(mk, back=1):
+    y, m = int(mk[:4]), int(mk[5:7])
+    m -= back
+    while m < 1: m += 12; y -= 1
+    return f"{y}-{m:02d}"
 
 def save_msg(uid, role, content):
     with get_db() as conn:
@@ -87,11 +155,9 @@ def get_daily_sheets(xl):
     import re
     result = []
     for s in xl.sheet_names:
-        # Format: 'Daily report N'
         m = re.match(r'Daily report\s+(\d+)', s, re.IGNORECASE)
         if m:
             result.append((int(m.group(1)), s)); continue
-        # Format: 'N June', 'N July', etc.
         m = re.match(r'(\d+)\s+\w+', s.strip())
         if m:
             result.append((int(m.group(1)), s)); continue
@@ -103,8 +169,6 @@ def extract_structured(file_bytes, filename):
                 'Super white Special','Pozz-crete','Flushing','flushing']
     lines = [f"REPORT: {filename}"]
 
-    # ── SUMMARY SHEET — authoritative monthly totals ──────
-    # IMPORTANT: Always use Summary for monthly totals — daily sheets may be incomplete
     summary_sheet = next((s for s in xl.sheet_names if 'summary' in s.lower()), None)
     if summary_sheet:
         try:
@@ -142,7 +206,6 @@ def extract_structured(file_bytes, filename):
         except Exception as e:
             logger.warning(f"Summary: {e}")
 
-    # ── Daily sheets — production + stoppages ─────────────
     lines.append("\n--- DAILY DATA (Day|Product|Prod_t|Hours|t/h|SPC_mill|SPC_plant|CK|Blaine|R45|WI) ---")
     daily_sheets = get_daily_sheets(xl)
     all_days = [d for d,_ in daily_sheets]
@@ -157,7 +220,6 @@ def extract_structured(file_bytes, filename):
             df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, header=None)
             headers = df.iloc[0].tolist()
 
-            # Production rows
             day_has_prod = False
             for ci, hdr in enumerate(headers):
                 hdr_s = str(hdr).strip()
@@ -166,7 +228,6 @@ def extract_structured(file_bytes, filename):
                 if not pt or pt <= 0: continue
                 day_has_prod = True
                 tph = round(pt/hrs,2) if hrs and hrs>0 else '-'
-                # Row indices: prod=1,hrs=2,tph=3,spc_mill=4,spc_plant=5,ck=9,blaine=11,r45=12,wi=14
                 row_vals = [day, hdr_s, f"{pt:.1f}", f"{hrs:.1f}", tph,
                             safe(df.iloc[4,ci]) or '-', safe(df.iloc[5,ci]) or '-',
                             safe(df.iloc[9,ci]) or '-', safe(df.iloc[11,ci]) or '-',
@@ -175,7 +236,6 @@ def extract_structured(file_bytes, filename):
             if not day_has_prod:
                 lines.append(f"{day}|ZERO_PRODUCTION|All products = 0t")
 
-            # Stoppages — rows 19+ in daily sheet
             for i in range(19, min(len(df), 35)):
                 dur  = safe(df.iloc[i, 0])
                 dept = str(df.iloc[i, 1]).strip() if pd.notna(df.iloc[i, 1]) else ''
@@ -186,7 +246,6 @@ def extract_structured(file_bytes, filename):
         except Exception as e:
             logger.warning(f"{sheet}: {e}")
 
-    # Power sheet
     if 'Power' in xl.sheet_names:
         lines.append("\n--- POWER SHEET ---")
         try:
@@ -194,7 +253,6 @@ def extract_structured(file_bytes, filename):
             lines.append(df.fillna('').to_string(max_rows=60, max_cols=12))
         except: pass
 
-    # PI sheet
     if 'PI' in xl.sheet_names:
         lines.append("\n--- STOPPAGES (PI) ---")
         try:
@@ -202,7 +260,6 @@ def extract_structured(file_bytes, filename):
             lines.append(df.fillna('').to_string(max_rows=15, max_cols=35))
         except: pass
 
-    # Stock
     if 'Stock' in xl.sheet_names:
         lines.append("\n--- STOCK ---")
         try:
@@ -210,7 +267,6 @@ def extract_structured(file_bytes, filename):
             lines.append(df.fillna('').to_string(max_rows=40, max_cols=12))
         except: pass
 
-    # DATA sheet — proportions only (rows with % data)
     if 'DATA' in xl.sheet_names:
         lines.append("\n--- PROPORTIONS & MOISTURE (DATA) ---")
         try:
@@ -300,6 +356,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Which days Blaine below minimum?\n"
         "• Compare production across months\n"
         "• Stoppage hours in April?\n\n"
+        "/report — full management PDF 📄\n"
+        "/alerts — instant alert summary 🔔\n"
         "/reports — list reports | /clear — reset chat",
         parse_mode='Markdown')
 
@@ -318,6 +376,61 @@ async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_db(update.effective_user.id)
     await update.message.reply_text("🗑️ Conversation cleared!")
 
+# ── NEW: /report [YYYY-MM] [cost=NNNNN] — full management PDF ─────────────
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied."); return
+    mk, cost = None, None
+    for a in context.args or []:
+        if re.match(r'^\d{4}-\d{2}$', a): mk = a
+        elif a.lower().startswith('cost='):
+            try: cost = float(a.split('=', 1)[1].replace(',', ''))
+            except ValueError: pass
+    mk = mk or latest_month_with_file()
+    if not mk:
+        await update.message.reply_text("📭 No Excel workbook stored yet — upload the monthly .xlsx first."); return
+    file_bytes, fname = load_file(mk)
+    if not file_bytes:
+        await update.message.reply_text(
+            f"⚠️ No workbook stored for `{mk}` — re-upload that month's .xlsx once and it will be kept for reports.",
+            parse_mode='Markdown'); return
+    status = await update.message.reply_text(f"⏳ Building full management report for {mk}... (~1 min)")
+    try:
+        year, month = int(mk[:4]), int(mk[5:7])
+        prev  = load_metrics(prev_month_key(mk, 1))
+        prev2 = load_metrics(prev_month_key(mk, 2))
+        stored = load_metrics(mk)
+        if cost is None and stored and stored.get('cost'):
+            cost = stored['cost']  # reuse any previously-set corrected cost
+        pdf_path, metrics = await asyncio.to_thread(
+            report_engine.generate_report, file_bytes, year, month,
+            prev=prev, prev2=prev2, elec_cost=cost)
+        save_report(mk, fname or f'{mk}.xlsx', None, None, metrics=metrics)
+        await status.edit_text("📤 Sending PDF...")
+        with open(pdf_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f, filename=f'production_report_{mk}.pdf',
+                caption=f"📊 Management report — {mk}"
+                        + (f" (electricity cost override: {cost:,.0f} JD)" if cost else ""))
+        await status.delete()
+    except Exception as e:
+        logger.error(f"/report error: {e}", exc_info=True)
+        await status.edit_text(f"❌ Report failed: {e}")
+
+# ── NEW: /alerts [YYYY-MM] — instant rule-based alert summary (no AI) ─────
+async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied."); return
+    mk = None
+    for a in context.args or []:
+        if re.match(r'^\d{4}-\d{2}$', a): mk = a
+    mk = mk or latest_month_with_file()
+    m = load_metrics(mk) if mk else None
+    if not m or not m.get('alerts'):
+        await update.message.reply_text(
+            "📭 No computed metrics yet — run /report once (or re-upload the month's .xlsx)."); return
+    await update.message.reply_text(report_engine.quick_alerts_text(m), parse_mode='Markdown')
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid): await update.message.reply_text("⛔ Access denied."); return
@@ -326,25 +439,35 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc.file_name.endswith('.xlsx'):
         await update.message.reply_text("⚠️ Please send .xlsx file."); return
 
-    status_msg = await update.message.reply_text("⏳ Step 1/3: Downloading file...")
+    status_msg = await update.message.reply_text("⏳ Step 1/4: Downloading file...")
     try:
-        # Step 1: Download
         file = await context.bot.get_file(doc.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
         mk = detect_month(doc.file_name)
 
-        # Step 2: Extract (this is the slow part for large files)
-        await status_msg.edit_text("⏳ Step 2/3: Reading all daily sheets + stoppages...")
+        await status_msg.edit_text("⏳ Step 2/4: Reading all daily sheets + stoppages...")
         structured = extract_structured(file_bytes, doc.file_name)
 
-        # Step 3: Summarize + Save
-        await status_msg.edit_text("⏳ Step 3/3: Generating summary...")
+        # ── NEW: compute deterministic metrics for /report & /alerts
+        await status_msg.edit_text("⏳ Step 3/4: Computing metrics (pools, alerts, recipes)...")
+        metrics = None
+        try:
+            year, month = int(mk[:4]), int(mk[5:7])
+            prev  = load_metrics(prev_month_key(mk, 1))
+            prev2 = load_metrics(prev_month_key(mk, 2))
+            metrics = await asyncio.to_thread(
+                report_engine.compute_metrics, file_bytes, year, month, prev=prev, prev2=prev2)
+        except Exception as e:
+            logger.warning(f"metrics computation failed (non-fatal): {e}")
+
+        await status_msg.edit_text("⏳ Step 4/4: Generating summary...")
         resp = client.messages.create(
             model="claude-sonnet-4-6", max_tokens=600,
             messages=[{"role":"user","content":
                 f"Summarize in 5 bullet points with exact numbers:\n\n{structured[:8000]}"}])
         summary = resp.content[0].text
-        save_report(mk, doc.file_name, structured, summary)
+        save_report(mk, doc.file_name, structured, summary,
+                    file_bytes=file_bytes, metrics=metrics)  # ── NEW: keep workbook + metrics
 
         data_size = len(structured)
         stop_count = structured.count('STOP|')
@@ -352,7 +475,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Saved: {doc.file_name}\n"
             f"📅 Period: {mk}\n"
             f"📦 Data: {data_size:,} chars | {stop_count} stoppage events extracted\n\n"
-            f"Summary:\n{summary}")
+            f"Summary:\n{summary}\n\n"
+            f"📄 /report {mk} — full PDF | 🔔 /alerts {mk}")
     except Exception as e:
         logger.error(f"Upload error: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
@@ -363,10 +487,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reports = load_all_reports()
     if not reports: await update.message.reply_text("📭 No reports loaded yet."); return
 
-    # Build compact context — max 35k chars per report
     reports_data = ""
     for month, data in sorted(reports.items()):
         content = data.get('structured') or data.get('raw_text','')
+        if not content: continue
         reports_data += f"\n\n{'='*50}\nREPORT: {month} — {data['filename']}\n{'='*50}\n"
         reports_data += content[:35000]
 
@@ -399,9 +523,11 @@ def main():
     app.add_handler(CommandHandler("start",   start))
     app.add_handler(CommandHandler("reports", list_reports))
     app.add_handler(CommandHandler("clear",   clear_cmd))
+    app.add_handler(CommandHandler("report",  report_cmd))   # ── NEW
+    app.add_handler(CommandHandler("alerts",  alerts_cmd))   # ── NEW
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🤖 Cement Bot v3 running...")
+    logger.info("🤖 Cement Bot v4 running (PDF report engine enabled)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

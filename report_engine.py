@@ -42,6 +42,21 @@ LIMITS = {  # tph_min, blaine_min, blaine_max, hex color
  'M50':          (19.0, 3900, 4300, '#8e44ad'),
  'M10':          (19.0, 3800, 4500, '#16a085')}
 
+MAT_ALIASES = {  # normalized (lower, no dots, single spaces) -> canonical
+ 'clinker roy': 'Clinker ROY', 'clinker r': 'Clinker ROY',
+ 'clinker sfw': 'Clinker SFW', 'clinker s': 'Clinker SFW',
+ 'clinker rak': 'Clinker RAK', 'clinker rk': 'Clinker RAK',
+ 'clinker j': 'Clinker J', 'clinker alb': 'Clinker ALB', 'clinker m': 'Clinker M',
+ 'limestone hg': 'Limestone HG', 'limestone lg': 'Limestone LG',
+ 'sand': 'Sand', 'sand & silica': 'Sand', 'sand& silica': 'Sand',
+ 'pozzolana': 'Pozzolana', 'gypsum': 'Gypsum', 'gypsum az': 'Gypsum AZ',
+ 'gypsum taf': 'Gypsum Taf', 'additive': 'Additive', 'grinding aids': 'Grinding aids',
+ 'quality enhancer': 'Quality enhancer', 'air entraining agent': 'Air entraining agent'}
+
+def canon_mat(name):
+    n = ' '.join(str(name).replace('.', '').split()).lower()
+    return MAT_ALIASES.get(n, str(name).strip())
+
 GREY_POOL  = ['Clinker J', 'Clinker M']            # M50 -> >= 6 months
 WHITE_POOL = ['Clinker ALB', 'Clinker SFW', 'Clinker RAK']  # whites -> >= 4 months
 GREY_FLOOR, WHITE_FLOOR = 6.0, 4.0
@@ -69,47 +84,86 @@ def _f(v):
     except (TypeError, ValueError): return None
 
 def extract(file_bytes):
-    """Read the workbook into a plain-dict structure. Summary sheet = truth."""
+    """Read the workbook into a plain-dict structure. Summary sheet = truth.
+    Layout-adaptive: column positions come from header LABELS (supports both the
+    2026 H1 template 'Daily report N' and the newer 'N June' template)."""
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     D = {'products': {}, 'plant': {}, 'stock_close': {}, 'stock_open': {},
          'imports': {}, 'silos': {}, 'daily': {}, 'stoppages': [], 'pi': {},
          'missing_days': [], 'zero_days': []}
 
-    # ---- Summary sheet (authoritative) ----
     sname = next((s for s in wb.sheetnames if 'summary' in s.lower()), None)
     if not sname:
         raise ValueError('Summary sheet not found — cannot build report (house rule).')
     rows = [list(r) for r in wb[sname].iter_rows(values_only=True)]
-    for r in rows:
+
+    # ---- product metric columns: mapped from the header row labels ----
+    def norm(s): return ' '.join(str(s).replace('-', ' ').split()).lower()
+    HDR_MAP = [('prod', 'production'), ('tph', 'mill productivity'),
+               ('spc_mill', 'mill spc'), ('spc_plant', 'total spc'),
+               ('hours', 'running hours'), ('ck', 'c/k'), ('clinker', 'clinker'),
+               ('limestone', 'limestone'), ('gypsum', 'gypsum'), ('sand', 'sand'),
+               ('pozzolana', 'pozzolana'), ('blaine', 'blaine'), ('r45', 'r45'),
+               ('wi', 'whiteness')]
+    colmap = {}
+    hdr_row = rows[0]
+    for ci, h in enumerate(hdr_row):
+        if h is None: continue
+        hn = norm(h)
+        for key, lab in HDR_MAP:
+            if key in colmap: continue
+            if lab == 'production' and hn == 'production':   # first 'Production' = tons; second = '%'
+                colmap[key] = ci
+            elif lab != 'production' and lab in hn:
+                colmap[key] = ci
+    for r in rows[1:14]:
         p = str(r[0]).strip() if r[0] else ''
         p = NAME_MAP.get(p, p)
-        if p in LIMITS and _f(r[1]):
-            D['products'][p] = {'prod': _f(r[1]), 'tph': _f(r[2]), 'spc_mill': _f(r[4]),
-                                'spc_plant': _f(r[5]), 'hours': _f(r[6]), 'ck': _f(r[7]),
-                                'clinker': _f(r[8]), 'limestone': _f(r[9]), 'gypsum': _f(r[10]),
-                                'sand': _f(r[11]), 'pozzolana': _f(r[12]),
-                                'blaine': _f(r[14]), 'r45': _f(r[15]), 'wi': _f(r[17]) if len(r) > 17 else None}
+        if p in LIMITS and _f(r[colmap.get('prod', 1)]):
+            D['products'][p] = {k: (_f(r[ci]) if ci is not None and ci < len(r) else None)
+                                for k, ci in ((k, colmap.get(k)) for k, _ in HDR_MAP)}
+
+    # ---- plant totals row: label-driven ----
     for i, r in enumerate(rows):
-        if str(r[0]).strip().lower().startswith('availability') and i + 1 < len(rows):
-            v = rows[i + 1]
-            D['plant'] = {'availability': _f(v[0]), 'utilization': _f(v[1]), 'prod': _f(v[2]),
-                          'avg_tph': _f(v[3]), 'kwh': _f(v[4]), 'spc': _f(v[5]),
-                          'hours': _f(v[6]), 'cost': _f(v[7])}
-        if 'Clinker ROY' in [str(x).strip() for x in r if x]:
-            labels = [str(x).strip() if x else '' for x in r]
-            if i + 1 < len(rows):
-                vals = rows[i + 1]
-                for lab, v in zip(labels, vals):
-                    if lab and _f(v) is not None:
-                        D['stock_close'][lab.rstrip()] = _f(v)
-        if r[0] and 'intal' in str(r[0]).lower():
+        if norm(r[0] or '').startswith('availability') and i + 1 < len(rows):
+            labels = [norm(x or '') for x in r]
+            vals = rows[i + 1]
+            def by(*keys):
+                for ci, lab in enumerate(labels):
+                    if lab and all(k in lab for k in keys) and ci < len(vals):
+                        return _f(vals[ci])
+                return None
+            D['plant'] = {'availability': by('availability'), 'utilization': by('utilization'),
+                          'prod': by('production'), 'avg_tph': by('tph'),
+                          'kwh': by('power'), 'spc': by('spc'),
+                          'hours': by('running'), 'cost': by('electricity')}
+            break
+
+    # ---- final raw-material stock: anchored on the 'Raw material' banner ----
+    for i, r in enumerate(rows):
+        if r[0] and 'raw material' in str(r[0]).lower():
+            names_row = next((rows[j] for j in range(i + 1, min(i + 3, len(rows)))
+                              if any(c and 'clinker' in str(c).lower() for c in rows[j])), None)
+            if names_row:
+                j = rows.index(names_row)
+                vals_row = rows[j + 1] if j + 1 < len(rows) else []
+                for name, v in zip(names_row, vals_row):
+                    if name and _f(v) is not None:
+                        D['stock_close'][canon_mat(name)] = _f(v)
+            break
+
+    # ---- silo levels ----
+    for r in rows:
+        a = str(r[0]).strip().lower() if r[0] else ''
+        if 'intal' in a or 'initial level' in a:
             D['silos']['start'] = [_f(x) for x in r[2:7]]
-        if r[0] and str(r[0]).strip().lower().startswith('end level'):
-            D['silos']['end'] = [_f(x) for x in r[2:7]]
-        if r[0] and str(r[0]).strip().lower().startswith('paking'):
+        elif a.startswith('end level'):
+            vals = [_f(x) for x in r[2:7]]
+            if any(v is not None for v in vals): D['silos']['end'] = vals
+        elif a.startswith('paking') or a.startswith('packing'):
             D['silos']['packing_raw'] = [_f(x) for x in r[2:9]]
 
-    # ---- Stock sheet: opening + imports ----
+    # ---- Stock sheet: opening + imports (canonical names) ----
     if 'Stock' in wb.sheetnames:
         mode = None
         for r in wb['Stock'].iter_rows(values_only=True):
@@ -117,10 +171,9 @@ def extract(file_bytes):
             if 'Initial' in a: mode = 'open'
             elif 'Daily import' in a: mode = 'imp'
             elif 'Material daily' in a: mode = None
-            mat = str(r[2]).strip() if r[2] else ''
+            mat = canon_mat(r[2]) if r[2] else ''
             if mode and mat:
-                vals = [_f(v) for v in r[3:34]]
-                nums = [v for v in vals if v is not None]
+                nums = [v for v in (_f(x) for x in r[3:34]) if v is not None]
                 if mode == 'open' and nums: D['stock_open'][mat] = nums[0]
                 elif mode == 'imp': D['imports'][mat] = sum(nums)
 
@@ -145,26 +198,66 @@ def extract(file_bytes):
     have = [d for d, _ in daily]
     if have:
         D['missing_days'] = [d for d in range(1, max(have) + 1) if d not in have]
-    METRIC_ROWS = {'prod': 1, 'hours': 2, 'tph': 3, 'spc_mill': 4, 'spc_plant': 5,
-                   'ck': 9, 'clinker': 10, 'blaine': 11, 'r45': 12, 'wi': 14}
+    METRIC_LABELS = {'prod': 'production', 'hours': 'running hours', 'tph': 'mill productiv',
+                     'spc_mill': 'mill specific', 'spc_plant': 'total specific',
+                     'ck': 'c/k', 'clinker': 'clinker', 'blaine': 'blaine',
+                     'r45': 'r45', 'wi': 'whiteness'}
     for day, sheet in daily:
         rws = [list(r) for r in wb[sheet].iter_rows(values_only=True)]
         heads = [NAME_MAP.get(str(h).strip(), str(h).strip()) if h else '' for h in rws[0]]
+        rowmap = {}
+        for ri, r in enumerate(rws[:18]):
+            lab = norm(r[0] or '')
+            if not lab: continue
+            for k, want in METRIC_LABELS.items():
+                if k not in rowmap and lab.startswith(want.split()[0]) and want.split()[0] in lab:
+                    if all(w in lab for w in want.split()): rowmap[k] = ri
         drec, has_prod = {}, False
         for ci, h in enumerate(heads):
             if h not in LIMITS: continue
-            pt = _f(rws[METRIC_ROWS['prod']][ci]) if len(rws) > 1 else None
+            pt = _f(rws[rowmap['prod']][ci]) if 'prod' in rowmap else None
             if not pt or pt <= 0.5: continue
             has_prod = True
-            drec[h] = {k: _f(rws[ri][ci]) if len(rws) > ri else None for k, ri in METRIC_ROWS.items()}
+            drec[h] = {k: (_f(rws[ri][ci]) if ci < len(rws[ri]) else None)
+                       for k, ri in rowmap.items()}
         D['daily'][day] = drec
         if not has_prod: D['zero_days'].append(day)
-        for i in range(18, min(len(rws), 40)):  # stoppages live from ~row 19 (idx 18+)
-            dur = _f(rws[i][0])
-            dept = str(rws[i][1]).strip() if rws[i][1] else ''
-            rsn = str(rws[i][2]).strip() if rws[i][2] else ''
-            if dur and dur > 0 and dept and dept.lower() not in ('nan', 'department'):
-                D['stoppages'].append({'day': day, 'hours': round(dur, 2), 'dept': dept, 'reason': rsn})
+
+        # stoppages: ANCHORED — June-style table under a 'stoppage' header,
+        # or legacy 'Remarks' free-text lines. Never blind numeric scanning.
+        anchored = False
+        for ri, r in enumerate(rws):
+            if r[0] and 'stoppage' in str(r[0]).lower() and 'duration' in str(r[0]).lower():
+                anchored = True
+                j = ri + 1
+                while j < len(rws) and isinstance(rws[j][0], (int, float)):
+                    D['stoppages'].append({'day': day, 'hours': round(float(rws[j][0]), 2),
+                                           'dept': str(rws[j][1]).strip() if rws[j][1] else '',
+                                           'reason': str(rws[j][2]).strip() if rws[j][2] else ''})
+                    j += 1
+                break
+        if not anchored:
+            for ri, r in enumerate(rws):
+                if r[0] and str(r[0]).strip().lower() == 'remarks':
+                    for j in range(ri + 1, min(ri + 8, len(rws))):
+                        txt = next((str(c).strip() for c in rws[j][:4] if c and str(c).strip()), '')
+                        if not txt: continue
+                        mh = re.search(r'([\d\.]+)\s*(?:h|hr|hour|hours)\b', txt.lower())
+                        D['stoppages'].append({'day': day,
+                                               'hours': round(float(mh.group(1)), 2) if mh else 0.0,
+                                               'dept': '', 'reason': txt[:160]})
+                    break
+
+    # ---- fallbacks for missing summary fields (older template) ----
+    for p, v in D['products'].items():
+        if not v.get('hours'):
+            v['hours'] = round(sum((r[p].get('hours') or 0)
+                                   for r in D['daily'].values() if p in r), 2) or None
+    if not D['plant'].get('hours'):
+        net = D['pi'].get('net', {})
+        s = sum(v for v in net.values() if v)
+        D['plant']['hours'] = round(s, 1) if s else round(sum(
+            (v.get('hours') or 0) for v in D['products'].values()), 1)
     wb.close()
     return D
 
@@ -926,3 +1019,29 @@ def compute_metrics(file_bytes, year, month, prev=None, prev2=None, elec_cost=No
     D = extract(file_bytes)
     A = analyze(D, year, month, prev=prev, prev2=prev2, elec_cost=elec_cost)
     return metrics_json(D, A, year, month)
+
+def detect_content_month(file_bytes):
+    """Read the workbook's internal dates (PI/Power/data headers) -> (year, month) or None.
+    Used to verify the filename-derived month key against actual content."""
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        for sn in ('PI', 'Power', 'data', 'DATA', 'Stock'):
+            if sn in wb.sheetnames:
+                row = next(wb[sn].iter_rows(max_row=1, values_only=True))
+                dates = [v for v in row if isinstance(v, datetime)]
+                if dates:
+                    wb.close()
+                    from collections import Counter
+                    ym = Counter((d.year, d.month) for d in dates).most_common(1)[0][0]
+                    return ym
+        # fallback: first daily sheet A1
+        import re as _re
+        for s in wb.sheetnames:
+            if _re.match(r'(Daily report\s+\d+|\d+\s+\w+)', s.strip(), _re.IGNORECASE):
+                a1 = next(wb[s].iter_rows(max_row=1, values_only=True))[0]
+                if isinstance(a1, datetime):
+                    wb.close(); return (a1.year, a1.month)
+        wb.close()
+    except Exception:
+        pass
+    return None

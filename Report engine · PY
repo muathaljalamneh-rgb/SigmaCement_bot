@@ -19,19 +19,15 @@ import io, os, json, calendar, tempfile
 from datetime import datetime
 from collections import defaultdict
 
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import numpy as np
 from openpyxl import load_workbook
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.lib import colors
-from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph,
-                                Spacer, Table, TableStyle, Image, PageBreak)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+os.environ.setdefault('MPLCONFIGDIR', '/tmp/mpl')  # writable font-cache dir on Railway
+
+# NOTE: matplotlib / reportlab / PIL are imported LAZILY inside make_charts()
+# and build_pdf() so that `import report_engine` at bot startup stays light and
+# cannot crash the service even if a plotting dependency has install issues —
+# any such problem surfaces as a clear /report error message instead.
 
 # ------------------------------------------------------------------ CONFIG ---
 NAME_MAP = {'Super white Special': 'M10', 'Super white Spec': 'M10',
@@ -62,9 +58,9 @@ STOP_CATS = [  # (category, keyword tests on lowercase reason)
  ('Electrical (other)',             lambda r,d: d == 'Electrical'),
 ]
 
-BLUE  = colors.HexColor('#1a5fa8'); DBLUE = colors.HexColor('#164e87')
-LGREY = colors.HexColor('#f2f4f6'); RED = colors.HexColor('#c0392b')
-ORANGE = colors.HexColor('#e67e22'); GREEN = colors.HexColor('#27ae60')
+BLUE_HEX, DBLUE_HEX = '#1a5fa8', '#164e87'
+LGREY_HEX, RED_HEX = '#f2f4f6', '#c0392b'
+ORANGE_HEX, GREEN_HEX = '#e67e22', '#27ae60'
 
 # ------------------------------------------------------------- EXTRACTION ---
 def _f(v):
@@ -290,9 +286,11 @@ def metrics_json(D, A, year, month):
     }
 
 # ----------------------------------------------------------------- CHARTS ---
-plt.rcParams.update({'font.size': 8, 'axes.grid': True, 'grid.alpha': 0.3, 'figure.dpi': 145})
-
 def make_charts(D, A, ch, year, month):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({'font.size': 8, 'axes.grid': True, 'grid.alpha': 0.3, 'figure.dpi': 145})
     mn = calendar.month_name[month]
     ndays = A['ndays']
     daily_tot = {d: sum((r[p]['prod'] or 0) for p in r) for d, r in D['daily'].items()}
@@ -408,6 +406,10 @@ def make_charts(D, A, ch, year, month):
 
 # -------------------------------------------------------------------- PDF ---
 def _styles():
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib import colors
+    BLUE = colors.HexColor(BLUE_HEX); DBLUE = colors.HexColor(DBLUE_HEX); RED = colors.HexColor(RED_HEX)
     base = getSampleStyleSheet()['Normal']
     def st(name, **kw): return ParagraphStyle(name, parent=base, **kw)
     return {
@@ -425,6 +427,16 @@ def _styles():
     }
 
 def build_pdf(D, A, ch, out_path, year, month):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph,
+                                    Spacer, Table, TableStyle, Image, PageBreak)
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    BLUE = colors.HexColor(BLUE_HEX); DBLUE = colors.HexColor(DBLUE_HEX)
+    LGREY = colors.HexColor(LGREY_HEX); RED = colors.HexColor(RED_HEX)
+    ORANGE = colors.HexColor(ORANGE_HEX); GREEN = colors.HexColor(GREEN_HEX)
     S = _styles(); W, H = A4
     mn = calendar.month_name[month]
     title = f'Monthly Production Report — {mn} {year}'

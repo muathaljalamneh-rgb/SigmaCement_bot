@@ -45,7 +45,7 @@ LIMITS = {  # tph_min, blaine_min, blaine_max, hex color
 MAT_ALIASES = {  # normalized (lower, no dots, single spaces) -> canonical
  'clinker roy': 'Clinker ROY', 'clinker r': 'Clinker ROY',
  'clinker sfw': 'Clinker SFW', 'clinker s': 'Clinker SFW',
- 'clinker rak': 'Clinker RAK', 'clinker rk': 'Clinker RAK',
+ 'clinker rak': 'Clinker RAK', 'clinker rk': 'Clinker RAK', 'clinker rhk': 'Clinker RAK',
  'clinker j': 'Clinker J', 'clinker alb': 'Clinker ALB', 'clinker m': 'Clinker M',
  'limestone hg': 'Limestone HG', 'limestone lg': 'Limestone LG',
  'sand': 'Sand', 'sand & silica': 'Sand', 'sand& silica': 'Sand',
@@ -56,6 +56,12 @@ MAT_ALIASES = {  # normalized (lower, no dots, single spaces) -> canonical
 def canon_mat(name):
     n = ' '.join(str(name).replace('.', '').split()).lower()
     return MAT_ALIASES.get(n, str(name).strip())
+
+CLINKER_PRICE_GREY, CLINKER_PRICE_WHITE = 36, 100        # JD/t — cost control
+WHITE_CLINKERS = {'Clinker ALB', 'Clinker SFW', 'Clinker RAK', 'Clinker ROY'}
+DATA_BLOCK_MAP = {'cem i 52,5 n': 'Power white', 'cem ii 42,5 n': 'Super white',
+                  'cem ii 32,5 n': 'Eco white', 'cem i 52,5 r': 'CEM I 52.5R',
+                  'masonry mortar m10': 'M10', 'masonry mortar m50': 'M50'}
 
 GREY_POOL  = ['Clinker J', 'Clinker M']            # M50 -> >= 6 months
 WHITE_POOL = ['Clinker ALB', 'Clinker SFW', 'Clinker RAK']  # whites -> >= 4 months
@@ -181,6 +187,53 @@ def extract(file_bytes):
                 nums = [v for v in (_f(x) for x in r[3:34]) if v is not None]
                 if mode == 'open' and nums: D['stock_open'][mat] = nums[0]
                 elif mode == 'imp': D['imports'][mat] = sum(nums)
+
+    # ---- data sheet: per-product daily material consumption + daily moisture ----
+    D['mat_daily'] = {}     # product -> {day: {material: tons}}
+    D['moisture'] = {}      # material -> {day: percent}
+    dsn = next((s for s in wb.sheetnames if s.strip().lower() == 'data'), None)
+    if dsn:
+        drows = [list(r) for r in wb[dsn].iter_rows(values_only=True)]
+        day_cols = {ci: v.day for ci, v in enumerate(drows[0]) if isinstance(v, datetime)}
+        blocks = [(i, DATA_BLOCK_MAP.get(' '.join(str(r[0]).split()).lower()))
+                  for i, r in enumerate(drows) if r[0] and str(r[0]).strip()]
+        for bi, (start, prod) in enumerate(blocks):
+            end = blocks[bi + 1][0] if bi + 1 < len(blocks) else len(drows)
+            if not prod: continue
+            cons = {}
+            i = start
+            while i < end - 1:
+                r = drows[i]
+                mat_lab = r[2]
+                if (mat_lab and str(r[3]).strip().lower() == 'start'
+                        and i + 1 < end and str(drows[i + 1][3]).strip().lower() == 'end'):
+                    mat = canon_mat(mat_lab)
+                    for ci, day in day_cols.items():
+                        s_, e_ = _f(r[ci]), _f(drows[i + 1][ci])
+                        if s_ is not None and e_ is not None and 0 <= e_ - s_ < 1000:
+                            t = e_ - s_
+                            if t > 0.05:
+                                cons.setdefault(day, {})[mat] = round(
+                                    cons.get(day, {}).get(mat, 0) + t, 2)
+                    i += 2
+                    continue
+                i += 1
+            if cons: D['mat_daily'][prod] = cons
+            if not D['moisture']:
+                for i2 in range(start, end):
+                    if drows[i2][1] and 'moist' in str(drows[i2][1]).lower():
+                        j = i2
+                        while j < end and (j == i2 or not drows[j][1]):
+                            mat_lab = drows[j][3] if drows[j][3] else drows[j][2]
+                            if not mat_lab or ':' in str(mat_lab): break
+                            mat = canon_mat(mat_lab)
+                            vals = {day: round(_f(drows[j][ci]) * 100, 2)
+                                    for ci, day in day_cols.items()
+                                    if _f(drows[j][ci]) is not None}
+                            if vals and mat not in D['moisture']:
+                                D['moisture'][mat] = vals
+                            j += 1
+                        break
 
     # ---- PI sheet ----
     if 'PI' in wb.sheetnames:
@@ -366,6 +419,27 @@ def analyze(D, year, month, prev=None, prev2=None, elec_cost=None):
                 gap += D['products'][n]['prod'] - A['packing'][n]
         A['packed_gap'] = round(gap, 1)
 
+    # white clinker consumed in M50 (price control: grey 36 vs white 100 JD/t)
+    wim, wim_days = 0.0, []
+    for day, mats in D.get('mat_daily', {}).get('M50', {}).items():
+        t = sum(v for m, v in mats.items() if m in WHITE_CLINKERS)
+        if t > 0.2:
+            wim += t
+            wim_days.append((day, round(t, 1),
+                             sorted((m, round(v, 1)) for m, v in mats.items() if m in WHITE_CLINKERS)))
+    A['white_in_m50'] = {'total_t': round(wim, 1),
+                         'excess_cost_jd': round(wim * (CLINKER_PRICE_WHITE - CLINKER_PRICE_GREY)),
+                         'days': sorted(wim_days)}
+
+    # moisture stats per material
+    A['moisture'] = {}
+    for mat, vals in D.get('moisture', {}).items():
+        vv = [v for v in vals.values() if v is not None]
+        if vv:
+            mx_day = max(vals, key=lambda d: vals[d])
+            A['moisture'][mat] = {'avg': round(sum(vv) / len(vv), 2),
+                                  'max': round(max(vv), 2), 'max_day': mx_day}
+
     # comparisons
     A['prev'], A['prev2'] = prev, prev2
     return A
@@ -383,6 +457,7 @@ def metrics_json(D, A, year, month):
      'grey_pool': A['grey_pool'], 'white_pool': A['white_pool'],
      'stock': A['stock'], 'zero_days': D['zero_days'], 'missing_days': D['missing_days'],
      'packed_gap': A.get('packed_gap'), 'm50_bulk': A.get('m50_bulk'),
+     'white_in_m50': A.get('white_in_m50'), 'moisture': A.get('moisture'),
     }
 
 # ----------------------------------------------------------------- CHARTS ---
@@ -854,6 +929,29 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
                    f'{pcl*100:.1f}' if pcl else '—'])
     tbl(rt)
     img(f'{ch}/recipe.png')
+    wim = A.get('white_in_m50') or {}
+    if wim.get('total_t', 0) > 0.5:
+        E.append(Paragraph('White Clinker Consumed in M50 — Cost Control', S['h2']))
+        wt = [['Day', 'White clinker (t)', 'Breakdown', 'Excess cost (JD)']]
+        for day, t, brk in wim['days']:
+            wt.append([day, f'{t:.1f}', ', '.join(f'{m.replace("Clinker ","")} {v}t' for m, v in brk),
+                       f'{t * (CLINKER_PRICE_WHITE - CLINKER_PRICE_GREY):,.0f}'])
+        wt.append(['TOTAL', f"{wim['total_t']:.1f}", '', f"{wim['excess_cost_jd']:,.0f}"])
+        tbl(wt, colw=[16 * mm, 32 * mm, 90 * mm, 44 * mm])
+        alert(f"COST CONTROL — WHITE CLINKER IN M50: {wim['total_t']:.1f} t of white clinker "
+              f"({CLINKER_PRICE_WHITE} JD/t) was fed into M50, whose recipe uses grey clinker "
+              f"({CLINKER_PRICE_GREY} JD/t) — an avoidable excess cost of ~{wim['excess_cost_jd']:,.0f} JD. "
+              f"Verify feeder routing / reclaim source on the listed days.", 'red')
+    if A.get('moisture'):
+        E.append(Paragraph('Material Daily Moisture (data sheet)', S['h2']))
+        mt = [['Material', 'Avg %', 'Max %', 'Max day']]
+        for mat, v in sorted(A['moisture'].items(), key=lambda x: -x[1]['avg']):
+            mt.append([mat, f"{v['avg']:.2f}", f"{v['max']:.2f}", v['max_day']])
+        tbl(mt, colw=[70 * mm, 37 * mm, 37 * mm, 38 * mm])
+        hi = [m for m, v in A['moisture'].items() if v['avg'] > 5]
+        if hi:
+            alert('High-moisture materials: ' + ', '.join(f"{m} ({A['moisture'][m]['avg']:.1f}%)" for m in hi)
+                  + ' — moisture consumes drying energy and inflates SPC on the products using them.', 'orange')
     tot_excess = sum(rd['excess_t'] for rd in A['recipe_dev'].values())
     if tot_excess > 5:
         alert(f"EXCESS CLINKER: ~{tot_excess:.0f} t consumed above steady-state recipes, concentrated on short post-stoppage "
@@ -981,6 +1079,10 @@ def quick_alerts_text(m):
     if wc and wc < WHITE_FLOOR: L.append(f"🔴 White clinker pool: *{wc:.1f} mo* (< {WHITE_FLOOR:.0f} mo floor) — order ~{WHITE_FLOOR*wd-ws_:,.0f} t")
     if gc and gc < GREY_FLOOR + 0.5: L.append(f"🟠 Grey clinker pool: *{gc:.1f} mo* (floor {GREY_FLOOR:.0f} mo)")
     if m['silofull_h'] > 10: L.append(f"🔴 Silos-full stops: *{m['silofull_h']:.1f} h* — dispatch bottleneck")
+    wim = m.get('white_in_m50') or {}
+    if wim.get('total_t', 0) > 0.5:
+        L.append(f"🔴 White clinker in M50: *{wim['total_t']:.1f} t* on days "
+                 f"{[d for d, _t, _b in wim['days']]} — excess cost ~*{wim['excess_cost_jd']:,} JD*")
     if m['incident_h'] > 20: L.append(f"🟠 Incident downtime: *{m['incident_h']:.1f} h*")
     for p, al in m['alerts'].items():
         if al.get('bl_low'): L.append(f"🟠 {p}: Blaine below min on days {[d for d, _ in al['bl_low']]}")
@@ -1022,6 +1124,11 @@ def detail_pack(D, A):
         'recipe_deviations': A['recipe_dev'],
         'product_thresholds': {p: {'tph_min': v[0], 'blaine_min': v[1], 'blaine_max': v[2]}
                                for p, v in LIMITS.items()},
+        'material_daily_consumption_t': D.get('mat_daily'),
+        'material_daily_moisture_pct': D.get('moisture'),
+        'white_clinker_in_M50': A.get('white_in_m50'),
+        'clinker_prices_jd_per_t': {'grey (J/M)': CLINKER_PRICE_GREY,
+                                    'white (ALB/SFW/RAK/ROY)': CLINKER_PRICE_WHITE},
     }
 
 

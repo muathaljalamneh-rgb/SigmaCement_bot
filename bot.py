@@ -707,7 +707,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                            'planned_h','incident_h','silofull_h','stop_cats',
                                            'grey_pool','white_pool','alerts','recipe_dev',
                                            'recipe_norm','zero_days','missing_days','packed_gap',
-                                           'products')}
+                                           'white_in_m50','moisture','products')}
             digests.append(json.dumps(slim, default=str))
         if digests:
             reports_data += ("\n\n" + "="*50 + "\nCOMPUTED MONTHLY ANALYTICS (deterministic — ground truth; "

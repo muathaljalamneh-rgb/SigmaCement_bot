@@ -101,6 +101,8 @@ def build_evidence(cur_metrics, cur_extra, history):
             'grey_pool_J_plus_M_for_M50_min_months': 6,
             'white_pool_ALB_SFW_RAK_for_whites_min_months': 4,
             'naming_maps': {'Power white-R': 'CEM I 52.5R', 'Super white Special': 'M10'},
+            'clinker_prices_jd_per_t': {'grey_J_M': 36, 'white_ALB_SFW_RAK_ROY': 100},
+            'white_clinker_in_M50_is_a_cost_leak': 'grey product must not consume 100 JD/t white clinker',
         },
         'current_month': _round(cur_metrics),
         'current_month_detail': _round(cur_extra),
@@ -113,6 +115,11 @@ def build_evidence(cur_metrics, cur_extra, history):
             "M50 is bulk so it has no packing figure.",
             "Short runs after stoppages tend to show inflated plant SPC (fixed loads spread over few tons) "
             "and clinker-rich recipes (feeders not yet stabilized).",
+            "Check material_daily_consumption_t for M50: any ALB/SFW/RAK/ROY tonnage there is premium white "
+            "clinker (100 JD/t) consumed in a grey product (36 JD/t) — cross-reference those days with the "
+            "recipe deviation days and the stoppage/changeover log to explain WHY it happened.",
+            "High material moisture (see material_daily_moisture_pct) consumes drying energy — correlate "
+            "high-moisture materials with the SPC of the products consuming them.",
         ],
     }
     return pack

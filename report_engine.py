@@ -132,9 +132,15 @@ def extract(file_bytes):
                 colmap[key] = ci
             elif lab != 'production' and lab in hn:
                 colmap[key] = ci
+    D['unknown_products'] = {}   # name -> total tons seen (not configured in LIMITS)
+    IGNORE_ROWS = {'flushing', 'availability', 'pozz-crete', ''}
     for r in rows[1:14]:
-        p = str(r[0]).strip() if r[0] else ''
-        p = NAME_MAP.get(p, p)
+        p_raw = str(r[0]).strip() if r[0] else ''
+        p = NAME_MAP.get(p_raw, p_raw)
+        pv_ = _f(r[colmap.get('prod', 1)])
+        if (p not in LIMITS and p.lower() not in IGNORE_ROWS
+                and pv_ and pv_ > 0.5 and not str(p_raw).replace('.', '').isdigit()):
+            D['unknown_products'][p] = round(pv_, 1)
         if p in LIMITS and _f(r[colmap.get('prod', 1)]):
             D['products'][p] = {k: (_f(r[ci]) if ci is not None and ci < len(r) else None)
                                 for k, ci in ((k, colmap.get(k)) for k, _ in HDR_MAP)}
@@ -282,6 +288,11 @@ def extract(file_bytes):
                     if all(w in lab for w in want.split()): rowmap[k] = ri
         drec, has_prod = {}, False
         for ci, h in enumerate(heads):
+            if h and h not in LIMITS and 'prod' in rowmap and h.lower() not in ('pozz-crete',):
+                pt_u = _f(rws[rowmap['prod']][ci])
+                if pt_u and pt_u > 0.5 and ':' not in h and not h[:4].isdigit():
+                    D.setdefault('_unknown_daily', {})[h] = round(
+                        D.get('_unknown_daily', {}).get(h, 0) + pt_u, 1)
             if h not in LIMITS: continue
             pt = _f(rws[rowmap['prod']][ci]) if 'prod' in rowmap else None
             if not pt or pt <= 0.5: continue
@@ -315,6 +326,11 @@ def extract(file_bytes):
                                                'hours': round(float(mh.group(1)), 2) if mh else 0.0,
                                                'dept': '', 'reason': txt[:160]})
                     break
+
+    # unknown products: Summary figure is authoritative; daily-only names fall back to daily sums
+    for name, t in (D.pop('_unknown_daily', {}) or {}).items():
+        if name not in D['unknown_products']:
+            D['unknown_products'][name] = t
 
     # ---- fallbacks for missing summary fields (older template) ----
     for p, v in D['products'].items():
@@ -471,6 +487,7 @@ def metrics_json(D, A, year, month):
      'stock': A['stock'], 'zero_days': D['zero_days'], 'missing_days': D['missing_days'],
      'packed_gap': A.get('packed_gap'), 'm50_bulk': A.get('m50_bulk'),
      'white_in_m50': A.get('white_in_m50'), 'moisture': A.get('moisture'),
+     'unknown_products': D.get('unknown_products') or {},
     }
 
 # ----------------------------------------------------------------- CHARTS ---
@@ -808,6 +825,12 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
         alert(f"Zero-production days: {zp}" + (' — all Fridays.' if all_fri and D['zero_days'] else '.'), 'orange')
     if D['missing_days']:
         alert(f"MISSING daily sheets for day(s): {D['missing_days']} — verify actual status before treating as zero (house rule).", 'red')
+    if D.get('unknown_products'):
+        up = ', '.join(f'{n} ({t:,.1f} t)' for n, t in D['unknown_products'].items())
+        alert(f"UNCONFIGURED PRODUCT(S) DETECTED: {up} — produced this month but not yet set up in the report "
+              f"engine. Their tonnage is counted in plant totals, but they get no dedicated section, quality "
+              f"alerting, or clinker-pool assignment until lab thresholds (Blaine min/max, t/h min) and pool "
+              f"classification (grey 36 JD/t vs white 100 JD/t) are provided.", 'orange')
     if prev:
         alert(f"Incident downtime {A['incident_h']:.1f} h vs {(prev.get('incident_h') or 0):.1f} h in {prev_name}. "
               f"Top actionable loss: silos-full stops {A['silofull_h']:.1f} h (~{A['silofull_loss_t']:.0f} t potential). See Section 2.", 'orange')
@@ -1111,6 +1134,9 @@ def quick_alerts_text(m):
     tot_ex = sum(rd['excess_t'] for rd in m['recipe_dev'].values())
     if tot_ex > 5: L.append(f"🟠 Excess clinker: ~{tot_ex:.0f} t on restart transients")
     if m.get('missing_days'): L.append(f"🟠 Missing daily sheets: {m['missing_days']}")
+    if m.get('unknown_products'):
+        up = ', '.join(f'{n} ({t:,.0f} t)' for n, t in m['unknown_products'].items())
+        L.append(f"🟠 New unconfigured product(s): *{up}* — send lab thresholds to enable full coverage")
     if len(L) == 2: L.append('✅ No active alerts — clean month.')
     return '\n'.join(L)
 

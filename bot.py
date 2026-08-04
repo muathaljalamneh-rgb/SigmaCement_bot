@@ -194,8 +194,8 @@ def get_daily_sheets(xl):
 
 def extract_structured(file_bytes, filename):
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
-    products = ['Power white','Super white','Eco white','CEM I 52,5 R','M50','M10',
-                'Super white Special','Pozz-crete','Flushing','flushing']
+    products = ['Power white','Super white','Eco white','CEM I 52,5 R','M50','M10','M110',
+                'Super white Special','VPA','Low alkalay','LOW ALK','Pozz-crete','Flushing','flushing']
     lines = [f"REPORT: {filename}"]
 
     summary_sheet = next((s for s in xl.sheet_names if 'summary' in s.lower()), None)

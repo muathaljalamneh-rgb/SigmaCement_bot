@@ -102,6 +102,7 @@ def build_evidence(cur_metrics, cur_extra, history):
             'white_pool_ALB_SFW_RAK_for_whites_min_months': 4,
             'naming_maps': {'Power white-R': 'CEM I 52.5R', 'Super white Special': 'M10'},
             'clinker_prices_jd_per_t': {'grey_J_M': 36, 'white_ALB_SFW_RAK_ROY': 100},
+            'electricity_tariff_fixed_jd_per_kwh': 0.07,
             'white_clinker_in_M50_is_a_cost_leak': 'grey product must not consume 100 JD/t white clinker',
         },
         'current_month': _round(cur_metrics),
@@ -120,6 +121,9 @@ def build_evidence(cur_metrics, cur_extra, history):
             "recipe deviation days and the stoppage/changeover log to explain WHY it happened.",
             "High material moisture (see material_daily_moisture_pct) consumes drying energy — correlate "
             "high-moisture materials with the SPC of the products consuming them.",
+            "standing_loss_clinker_ratio_vs_prev and standing_loss_electricity_vs_prev are already computed "
+            "and rendered as fixed tables in the report; do NOT restate their totals as an insight — instead "
+            "EXPLAIN their root causes (which days/events drove the ratio drift or SPC change) if material.",
         ],
     }
     return pack

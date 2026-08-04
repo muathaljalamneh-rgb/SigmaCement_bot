@@ -32,7 +32,9 @@ os.environ.setdefault('MPLCONFIGDIR', '/tmp/mpl')  # writable font-cache dir on 
 # ------------------------------------------------------------------ CONFIG ---
 NAME_MAP = {'Super white Special': 'M10', 'Super white Spec': 'M10',
             'CEM I 52,5 R': 'CEM I 52.5R', 'Power white-R': 'CEM I 52.5R',
-            'Wateen M10': 'M10', 'Wateen M50': 'M50'}
+            'Wateen M10': 'M10', 'Wateen M50': 'M50', 'M110': 'M10',
+            'VPA': 'VPA', 'Low alkalay': 'Low Alkali', 'Low Alkalay': 'Low Alkali',
+            'LOW ALK': 'Low Alkali', 'Low Alk': 'Low Alkali'}
 
 LIMITS = {  # tph_min, blaine_min, blaine_max, hex color
  'Power white':  (19.5, 3900, 4400, '#d35400'),
@@ -40,7 +42,9 @@ LIMITS = {  # tph_min, blaine_min, blaine_max, hex color
  'Eco white':    (19.5, 4800, 5700, '#27ae60'),
  'CEM I 52.5R':  (19.0, 3900, 4400, '#5d6d7e'),
  'M50':          (19.0, 3900, 4300, '#8e44ad'),
- 'M10':          (19.0, 3800, 4500, '#16a085')}
+ 'M10':          (19.0, 3800, 4500, '#16a085'),
+ 'VPA':          (None, None, None, '#b0388e'),   # new product — thresholds TBD by lab
+ 'Low Alkali':   (None, None, None, '#616a6b')}   # new product — thresholds TBD by lab
 
 MAT_ALIASES = {  # normalized (lower, no dots, single spaces) -> canonical
  'clinker roy': 'Clinker ROY', 'clinker r': 'Clinker ROY',
@@ -61,7 +65,8 @@ CLINKER_PRICE_GREY, CLINKER_PRICE_WHITE = 36, 100        # JD/t — cost control
 WHITE_CLINKERS = {'Clinker ALB', 'Clinker SFW', 'Clinker RAK', 'Clinker ROY'}
 DATA_BLOCK_MAP = {'cem i 52,5 n': 'Power white', 'cem ii 42,5 n': 'Super white',
                   'cem ii 32,5 n': 'Eco white', 'cem i 52,5 r': 'CEM I 52.5R',
-                  'masonry mortar m10': 'M10', 'masonry mortar m50': 'M50'}
+                  'masonry mortar m10': 'M10', 'masonry mortar m50': 'M50',
+                  'vpa': 'VPA', 'low alkalay': 'Low Alkali'}
 
 GREY_POOL  = ['Clinker J', 'Clinker M']            # M50 -> >= 6 months
 WHITE_POOL = ['Clinker ALB', 'Clinker SFW', 'Clinker RAK']  # whites -> >= 4 months
@@ -70,11 +75,16 @@ BULK_PRODUCTS = {'M50'}                            # no packing reconciliation
 
 STOP_CATS = [  # (category, keyword tests on lowercase reason)
  ('Weekly holiday (Friday)',        lambda r,d: 'holiday' in r or 'week end' in r or 'weekend' in r),
- ('Silos full / dispatch',          lambda r,d: 'full silo' in r or 'full for level' in r or 'high level on silo' in r),
+ ('Silos full / dispatch',          lambda r,d: 'full silo' in r or 'silo full' in r or 'silos full' in r
+                                                 or 'full for level' in r or 'high level on silo' in r),
  ('Process fan (electrical)',       lambda r,d: 'process fan' in r or 'disconeccector' in r or 'disconnector' in r),
- ('Changeover / silo logistics',    lambda r,d: 'switching product' in r or 'convert to' in r or 'emtying silo' in r or 'emptying silo' in r or ('emptying' in r and 'switch' in r)),
- ('External power outage',          lambda r,d: 'power outage' in r or 'electricity supplier' in r),
- ('Human / operational error',      lambda r,d: 'mistake' in r or 'arrival delay' in r or 'samples failed' in r),
+ ('Changeover / silo logistics',    lambda r,d: 'switching product' in r or 'convert to' in r or 'emtying silo' in r
+                                                 or 'emptying silo' in r or ('emptying' in r and 'switch' in r)
+                                                 or 'discharg' in r),
+ ('No demand (market)',             lambda r,d: 'no need' in r),
+ ('External power outage',          lambda r,d: 'power outage' in r or 'power out' in r or 'electricity supplier' in r),
+ ('Human / operational error',      lambda r,d: 'mistake' in r or 'arrival delay' in r or 'samples failed' in r
+                                                 or 'miss oper' in r),
  ('Mechanical',                     lambda r,d: d == 'Mechanical'),
  ('Electrical (other)',             lambda r,d: d == 'Electrical'),
 ]
@@ -364,9 +374,12 @@ def analyze(D, year, month, prev=None, prev2=None, elec_cost=None):
             A['alerts'][p] = {'bl_low': [], 'bl_high': [], 'tph_low': []}
             continue
         A['alerts'][p] = {
-         'bl_low':  sorted((d, round(v['blaine'])) for d, v in rows.items() if v.get('blaine') and v['blaine'] < bmin),
-         'bl_high': sorted((d, round(v['blaine'])) for d, v in rows.items() if v.get('blaine') and v['blaine'] > bmax),
-         'tph_low': sorted((d, round(v['tph'], 2)) for d, v in rows.items() if v.get('tph') and v['tph'] < tmin)}
+         'bl_low':  sorted((d, round(v['blaine'])) for d, v in rows.items()
+                           if bmin and v.get('blaine') and v['blaine'] < bmin),
+         'bl_high': sorted((d, round(v['blaine'])) for d, v in rows.items()
+                           if bmax and v.get('blaine') and v['blaine'] > bmax),
+         'tph_low': sorted((d, round(v['tph'], 2)) for d, v in rows.items()
+                           if tmin and v.get('tph') and v['tph'] < tmin)}
         stable = [v['clinker'] * 100 for d, v in rows.items()
                   if v.get('clinker') and (v.get('hours') or 0) >= 8]
         pool = stable or [v['clinker'] * 100 for v in rows.values() if v.get('clinker')]
@@ -541,17 +554,22 @@ def make_charts(D, A, ch, year, month):
         tph = [rows[d]['tph'] or 0 for d in ds]
         fig, ax = plt.subplots(figsize=(8.6, 1.9))
         ax.plot(xs, tph, '-o', ms=3.5, color=color)
-        ax.axhline(tmin, ls='--', color='red', lw=.9, label=f'Min {tmin}')
+        if tmin: ax.axhline(tmin, ls='--', color='red', lw=.9, label=f'Min {tmin}')
         ax.axhline(np.mean(tph), ls=':', color='gray', lw=.9, label=f'Avg {np.mean(tph):.2f}')
-        ax.set_xticks(xs); ax.set_xticklabels(ds); ax.set_ylabel('t/h'); ax.legend(fontsize=6.5)
+        ax.set_xticks(xs); ax.set_xticklabels(ds); ax.set_ylabel('t/h')
+        if ax.get_legend_handles_labels()[1]: ax.legend(fontsize=6.5)
         plt.tight_layout(); plt.savefig(f'{ch}/{key}_tph.png'); plt.close()
         bl = [rows[d]['blaine'] or 0 for d in ds]
+        if not any(bl): continue
         fig, ax = plt.subplots(figsize=(8.6, 1.9))
-        ax.bar(xs, bl, .55, color=['#c0392b' if (v < bmin or v > bmax) else color for v in bl])
-        ax.axhline(bmin, ls='--', color='red', lw=.9, label=f'Min {bmin}')
-        ax.axhline(bmax, ls='--', color='green', lw=.9, label=f'Max {bmax}')
-        ax.set_ylim(min(bl + [bmin]) - 250, max(bl + [bmax]) + 150)
-        ax.set_xticks(xs); ax.set_xticklabels(ds); ax.set_ylabel('cm2/g'); ax.legend(fontsize=6.5, loc='lower right')
+        viol = (lambda v: (bmin and v < bmin) or (bmax and v > bmax))
+        ax.bar(xs, bl, .55, color=['#c0392b' if viol(v) else color for v in bl])
+        if bmin: ax.axhline(bmin, ls='--', color='red', lw=.9, label=f'Min {bmin}')
+        if bmax: ax.axhline(bmax, ls='--', color='green', lw=.9, label=f'Max {bmax}')
+        bounds = [b for b in (bmin, bmax) if b]
+        ax.set_ylim(min(bl + bounds) - 250, max(bl + bounds) + 150)
+        ax.set_xticks(xs); ax.set_xticklabels(ds); ax.set_ylabel('cm2/g')
+        if ax.get_legend_handles_labels()[1]: ax.legend(fontsize=6.5, loc='lower right')
         plt.tight_layout(); plt.savefig(f'{ch}/{key}_blaine.png'); plt.close()
 
     # recipe deviation chart (products having deviation days)
@@ -911,7 +929,11 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
                   + ', '.join(f'Day {d} ({c}%)' for d, c, _t in rd['days'])
                   + (f". Excess clinker consumed: ~{rd['excess_t']:.0f} t." if rd['excess_t'] > 1 else '.'), 'orange')
         if not (al.get('bl_low') or al.get('bl_high') or al.get('tph_low') or (rd and rd['days'])):
-            alert('OK — no quality or productivity threshold breaches this month.', 'green')
+            if tmin is None and bmin is None:
+                alert('NEW PRODUCT — no quality/productivity thresholds defined yet. Provide lab limits '
+                      '(Blaine min/max, t/h min) to enable automatic alerting.', 'orange')
+            else:
+                alert('OK — no quality or productivity threshold breaches this month.', 'green')
         if p in BULK_PRODUCTS:
             alert('Note: this product ships 100% in bulk — no packing line applies.', 'green')
         E.append(PageBreak())

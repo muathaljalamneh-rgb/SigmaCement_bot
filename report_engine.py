@@ -62,7 +62,11 @@ def canon_mat(name):
     return MAT_ALIASES.get(n, str(name).strip())
 
 CLINKER_PRICE_GREY, CLINKER_PRICE_WHITE = 36, 100        # JD/t — cost control
+TARIFF_JD_PER_KWH = 0.07                                 # fixed standard tariff (house rule)
 WHITE_CLINKERS = {'Clinker ALB', 'Clinker SFW', 'Clinker RAK', 'Clinker ROY'}
+PRODUCT_POOL = {'Power white': 'white', 'Super white': 'white', 'Eco white': 'white',
+                'CEM I 52.5R': 'white', 'M50': 'grey', 'M10': 'grey'}
+                # VPA / Low Alkali: add here once their clinker source is confirmed
 DATA_BLOCK_MAP = {'cem i 52,5 n': 'Power white', 'cem ii 42,5 n': 'Super white',
                   'cem ii 32,5 n': 'Eco white', 'cem i 52,5 r': 'CEM I 52.5R',
                   'masonry mortar m10': 'M10', 'masonry mortar m50': 'M50',
@@ -363,7 +367,9 @@ def analyze(D, year, month, prev=None, prev2=None, elec_cost=None):
     cost = elec_cost if elec_cost else (D['plant'].get('cost') or 0)
     A['cost'] = cost
     A['jd_per_t'] = cost / D['plant']['prod'] if D['plant'].get('prod') else None
-    A['tariff'] = cost / D['plant']['kwh'] if D['plant'].get('kwh') else None
+    A['tariff'] = TARIFF_JD_PER_KWH   # fixed by policy — never derived from billing
+    A['billing_variance_jd'] = (round(cost - D['plant']['kwh'] * TARIFF_JD_PER_KWH)
+                                if cost and D['plant'].get('kwh') else None)
 
     # stoppage categories
     cats, ev = defaultdict(float), defaultdict(int)
@@ -469,6 +475,42 @@ def analyze(D, year, month, prev=None, prev2=None, elec_cost=None):
             A['moisture'][mat] = {'avg': round(sum(vv) / len(vv), 2),
                                   'max': round(max(vv), 2), 'max_day': mx_day}
 
+    # ---- standing loss indicator 1: clinker-ratio drift vs previous month ----
+    cl = {'items': [], 'total_t': 0.0, 'total_jd': 0}
+    if prev and prev.get('products'):
+        for p, v in D['products'].items():
+            base = (prev['products'].get(p) or {}).get('clinker')
+            cur, pool = v.get('clinker'), PRODUCT_POOL.get(p)
+            if base and cur and v.get('prod') and pool:
+                dpp = (cur - base) * 100
+                if abs(dpp) >= 0.2:
+                    t = v['prod'] * dpp / 100
+                    price = CLINKER_PRICE_WHITE if pool == 'white' else CLINKER_PRICE_GREY
+                    cl['items'].append({'product': p, 'prev_pct': round(base * 100, 1),
+                                        'cur_pct': round(cur * 100, 1), 'delta_pp': round(dpp, 1),
+                                        'extra_t': round(t, 1), 'jd': round(t * price)})
+                    cl['total_t'] += t; cl['total_jd'] += t * price
+        cl['total_t'] = round(cl['total_t'], 1); cl['total_jd'] = round(cl['total_jd'])
+    A['clinker_loss'] = cl
+
+    # ---- standing loss indicator 2: electricity overspend vs previous month ----
+    pw = None
+    if prev and prev.get('plant'):
+        pw = {}
+        spc_p, spc_n = prev['plant'].get('spc'), D['plant'].get('spc')
+        tons = D['plant'].get('prod')
+        if spc_p and spc_n and tons:
+            dkwh = (spc_n - spc_p) * tons
+            pw.update({'spc_prev': round(spc_p, 2), 'spc_now': round(spc_n, 2),
+                       'spc_delta': round(spc_n - spc_p, 2), 'extra_kwh': round(dkwh),
+                       'efficiency_jd': round(dkwh * TARIFF_JD_PER_KWH)})
+        pw['billing_var_now'] = A.get('billing_variance_jd')
+        pw['billing_var_prev'] = None
+        if prev.get('cost') and (prev.get('plant') or {}).get('kwh'):
+            pw['billing_var_prev'] = round(prev['cost'] - prev['plant']['kwh'] * TARIFF_JD_PER_KWH)
+        pw['total_jd'] = pw.get('efficiency_jd', 0)
+    A['power_loss'] = pw
+
     # comparisons
     A['prev'], A['prev2'] = prev, prev2
     return A
@@ -488,6 +530,7 @@ def metrics_json(D, A, year, month):
      'packed_gap': A.get('packed_gap'), 'm50_bulk': A.get('m50_bulk'),
      'white_in_m50': A.get('white_in_m50'), 'moisture': A.get('moisture'),
      'unknown_products': D.get('unknown_products') or {},
+     'clinker_loss': A.get('clinker_loss'), 'power_loss': A.get('power_loss'),
     }
 
 # ----------------------------------------------------------------- CHARTS ---
@@ -885,12 +928,13 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
         pt.append([p, f"{P[p]['spc_plant']:.2f}", fnum(pv(p, 'spc_plant'), '{:.2f}'),
                    pct(P[p]['spc_plant'], pv(p, 'spc_plant')), f"{P[p]['spc_mill']:.2f}"])
     tbl(pt)
+    bv = A.get('billing_variance_jd')
     msg = (f"Electricity cost {A['cost']:,.0f} JD"
            + (f" ({pct(A['cost'], prev.get('cost'))} vs {prev_name})" if prev and prev.get('cost') else '')
-           + f" | cost per ton {A['jd_per_t']:.2f} JD/t"
+           + (f" | cost per ton {A['jd_per_t']:.2f} JD/t" if A.get('jd_per_t') else '')
            + (f" ({prev_name}: {prev.get('jd_per_t'):.2f})" if prev and prev.get('jd_per_t') else '')
-           + f" | effective tariff {A['tariff']:.4f} JD/kWh"
-           + (f" ({prev_name}: {prev.get('tariff'):.4f})" if prev and prev.get('tariff') else '') + '.')
+           + f" | standard tariff {TARIFF_JD_PER_KWH} JD/kWh (fixed)"
+           + (f" | billed vs standard: {bv:+,} JD" if bv is not None else '') + '.')
     good = (not prev) or (not prev.get('jd_per_t')) or (A['jd_per_t'] or 9e9) <= prev['jd_per_t'] * 1.02
     alert(msg, 'green' if good else 'orange')
     E.append(PageBreak())
@@ -1064,6 +1108,52 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
                 and len(A['alerts'][p]['bl_low']) >= max(2, len([d for d, r in D['daily'].items() if p in r]) // 3)]
     tot_excess2 = sum(rd['excess_t'] for rd in A['recipe_dev'].values())
     sec('8', 'Analytical Insights — Cross-Linked Findings')
+    # ---- standing cost-loss indicators (deterministic, always shown) ----
+    E.append(Paragraph('Standing Cost Indicators vs Previous Month (computed)', S['h2']))
+    clx = A.get('clinker_loss') or {}
+    if clx.get('items'):
+        ct2 = [['Product', f'{prev_name} clinker %', 'Now %', 'Δ pp', 'Extra clinker (t)', 'Cost impact (JD)']]
+        for it in clx['items']:
+            ct2.append([it['product'], f"{it['prev_pct']:.1f}", f"{it['cur_pct']:.1f}",
+                        f"{it['delta_pp']:+.1f}", f"{it['extra_t']:+,.1f}", f"{it['jd']:+,}"])
+        ct2.append(['TOTAL', '', '', '', f"{clx['total_t']:+,.1f}", f"{clx['total_jd']:+,}"])
+        tbl(ct2, colw=[34 * mm, 32 * mm, 22 * mm, 20 * mm, 36 * mm, 38 * mm])
+        if clx['total_jd'] > 200:
+            alert(f"CLINKER-RATIO LOSS: recipes ran {clx['total_t']:+,.1f} t of clinker vs {prev_name}'s ratios "
+                  f"at this month's volumes — a cost impact of ~{clx['total_jd']:+,} JD (white clinker priced "
+                  f"{CLINKER_PRICE_WHITE}, grey {CLINKER_PRICE_GREY} JD/t).", 'red')
+        elif clx['total_jd'] < -200:
+            alert(f"CLINKER-RATIO SAVING: recipes used {abs(clx['total_t']):,.1f} t LESS clinker than "
+                  f"{prev_name}'s ratios would have at this month's volumes — ~{abs(clx['total_jd']):,} JD saved.", 'green')
+        else:
+            alert(f"Clinker ratios essentially unchanged vs {prev_name} (net {clx['total_jd']:+,} JD).", 'green')
+    else:
+        E.append(Paragraph(f'Clinker-ratio comparison: no prior-month recipe baseline available.', S['body']))
+    pwx = A.get('power_loss')
+    if pwx and pwx.get('spc_delta') is not None:
+        pt2 = [['Component', 'Detail', 'Impact (JD)']]
+        pt2.append(['Efficiency (SPC)',
+                    f"SPC {pwx['spc_prev']} → {pwx['spc_now']} kWh/t ({pwx['spc_delta']:+.2f}) "
+                    f"× {PL.get('prod'):,.0f} t = {pwx['extra_kwh']:+,} kWh @ {TARIFF_JD_PER_KWH} JD/kWh",
+                    f"{pwx['efficiency_jd']:+,}"])
+        if pwx.get('billing_var_now') is not None:
+            det = f"billed {A['cost']:,.0f} vs {PL.get('kwh', 0) * TARIFF_JD_PER_KWH:,.0f} at standard tariff"
+            if pwx.get('billing_var_prev') is not None:
+                det += f" ({prev_name}: {pwx['billing_var_prev']:+,})"
+            pt2.append(['Billing variance (info)', det, f"{pwx['billing_var_now']:+,}"])
+        pt2.append([f'ELECTRICITY LOSS vs {prev_name} (efficiency)', '', f"{pwx['total_jd']:+,}"])
+        tbl(pt2, colw=[42 * mm, 96 * mm, 44 * mm])
+        if pwx['total_jd'] > 200:
+            alert(f"ELECTRICITY OVERSPEND: this month cost ~{pwx['total_jd']:+,} JD more than it would have at "
+                  f"{prev_name}'s efficiency and tariff, at the same volume.", 'red')
+        elif pwx['total_jd'] < -200:
+            alert(f"ELECTRICITY SAVING: ~{abs(pwx['total_jd']):,} JD below {prev_name}'s efficiency/tariff basis "
+                  f"at this month's volume.", 'green')
+        else:
+            alert(f"Electricity spend in line with {prev_name} basis (net {pwx['total_jd']:+,} JD).", 'green')
+    else:
+        E.append(Paragraph('Electricity comparison: no prior-month basis available.', S['body']))
+    E.append(Spacer(1, 6))
     if ai and ai.get('insights'):
         E.append(Paragraph('Findings produced by linking the daily stoppage log, power register, stock and silo '
                            'movements, recipe ratios and quality data across all available months.', S['body']))
@@ -1177,6 +1267,8 @@ def detail_pack(D, A):
         'white_clinker_in_M50': A.get('white_in_m50'),
         'clinker_prices_jd_per_t': {'grey (J/M)': CLINKER_PRICE_GREY,
                                     'white (ALB/SFW/RAK/ROY)': CLINKER_PRICE_WHITE},
+        'standing_loss_clinker_ratio_vs_prev': A.get('clinker_loss'),
+        'standing_loss_electricity_vs_prev': A.get('power_loss'),
     }
 
 

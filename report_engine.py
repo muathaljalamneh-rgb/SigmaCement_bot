@@ -364,12 +364,20 @@ def analyze(D, year, month, prev=None, prev2=None, elec_cost=None):
     ndays = calendar.monthrange(year, month)[1]
     A['fridays'] = [d for d in range(1, ndays + 1) if datetime(year, month, d).weekday() == 4]
     A['ndays'] = ndays
-    cost = elec_cost if elec_cost else (D['plant'].get('cost') or 0)
-    A['cost'] = cost
+    kwh = D['plant'].get('kwh')
+    billed = D['plant'].get('cost')          # figure typed in the summary sheet (reference only)
+    if elec_cost:                            # explicit user override wins
+        cost = elec_cost
+    elif kwh:                                # HOUSE RULE: cost = kWh x fixed tariff 0.07
+        cost = kwh * TARIFF_JD_PER_KWH
+    else:
+        cost = billed or 0
+    A['cost'] = round(cost, 1)
+    A['cost_billed'] = billed
     A['jd_per_t'] = cost / D['plant']['prod'] if D['plant'].get('prod') else None
     A['tariff'] = TARIFF_JD_PER_KWH   # fixed by policy — never derived from billing
-    A['billing_variance_jd'] = (round(cost - D['plant']['kwh'] * TARIFF_JD_PER_KWH)
-                                if cost and D['plant'].get('kwh') else None)
+    A['billing_variance_jd'] = (round(billed - kwh * TARIFF_JD_PER_KWH)
+                                if billed and kwh else None)
 
     # stoppage categories
     cats, ev = defaultdict(float), defaultdict(int)
@@ -855,7 +863,7 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
          (g(PL.get('avg_tph'), '{:.2f}'), 't/h', 'Avg Mill Productivity', '#b9770e'),
          (g(PL.get('kwh'), '{:,.0f}'), 'kWh', 'Power Consumption', '#8e44ad')])
     kpi([(g(PL.get('spc'), '{:.2f}'), 'kWh/t', f"Plant SPC ({prev_name}: {fnum((prev or {}).get('plant',{}).get('spc'),'{:.2f}') if prev else '—'})", '#1d6f42'),
-         (f"{A['cost']:,.0f}", 'JD/month', f"Electricity Cost ({pct(A['cost'], (prev or {}).get('cost')) if prev else '—'})", '#117864'),
+         (f"{A['cost']:,.0f}", 'JD @0.07/kWh', f"Electricity Cost ({pct(A['cost'], (prev or {}).get('cost')) if prev else '—'})", '#117864'),
          (gp(PL.get('availability')), 'overall', 'Availability', '#1a5fa8'),
          (gp(PL.get('utilization')), '', 'Utilization', '#1a5fa8')])
     zp = ', '.join(str(d) for d in D['zero_days']) or 'none'
@@ -929,12 +937,14 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
                    pct(P[p]['spc_plant'], pv(p, 'spc_plant')), f"{P[p]['spc_mill']:.2f}"])
     tbl(pt)
     bv = A.get('billing_variance_jd')
-    msg = (f"Electricity cost {A['cost']:,.0f} JD"
+    msg = (f"Electricity cost {A['cost']:,.0f} JD — computed at the fixed tariff "
+           f"{TARIFF_JD_PER_KWH} JD/kWh x {PL.get('kwh', 0):,.0f} kWh (house rule)"
            + (f" ({pct(A['cost'], prev.get('cost'))} vs {prev_name})" if prev and prev.get('cost') else '')
            + (f" | cost per ton {A['jd_per_t']:.2f} JD/t" if A.get('jd_per_t') else '')
-           + (f" ({prev_name}: {prev.get('jd_per_t'):.2f})" if prev and prev.get('jd_per_t') else '')
-           + f" | standard tariff {TARIFF_JD_PER_KWH} JD/kWh (fixed)"
-           + (f" | billed vs standard: {bv:+,} JD" if bv is not None else '') + '.')
+           + (f" ({prev_name}: {prev.get('jd_per_t'):.2f})" if prev and prev.get('jd_per_t') else '') + '.')
+    if bv is not None and abs(bv) > max(200, 0.02 * (A['cost'] or 1)):
+        msg += (f" NOTE: the summary sheet carries a billed figure of {A['cost_billed']:,.0f} JD "
+                f"({bv:+,} vs computed) — verify the invoice.")
     good = (not prev) or (not prev.get('jd_per_t')) or (A['jd_per_t'] or 9e9) <= prev['jd_per_t'] * 1.02
     alert(msg, 'green' if good else 'orange')
     E.append(PageBreak())
@@ -1137,7 +1147,8 @@ def build_pdf(D, A, ch, out_path, year, month, ai=None):
                     f"× {PL.get('prod'):,.0f} t = {pwx['extra_kwh']:+,} kWh @ {TARIFF_JD_PER_KWH} JD/kWh",
                     f"{pwx['efficiency_jd']:+,}"])
         if pwx.get('billing_var_now') is not None:
-            det = f"billed {A['cost']:,.0f} vs {PL.get('kwh', 0) * TARIFF_JD_PER_KWH:,.0f} at standard tariff"
+            det = (f"summary-sheet billed {A.get('cost_billed') or 0:,.0f} vs computed "
+                   f"{PL.get('kwh', 0) * TARIFF_JD_PER_KWH:,.0f} JD")
             if pwx.get('billing_var_prev') is not None:
                 det += f" ({prev_name}: {pwx['billing_var_prev']:+,})"
             pt2.append(['Billing variance (info)', det, f"{pwx['billing_var_now']:+,}"])

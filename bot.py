@@ -484,9 +484,7 @@ async def _build_and_send_report(update, mk, cost=None):
         year, month = int(mk[:4]), int(mk[5:7])
         prev  = load_metrics(prev_month_key(mk, 1))
         prev2 = load_metrics(prev_month_key(mk, 2))
-        stored = load_metrics(mk)
-        if cost is None and stored and stored.get('cost'):
-            cost = stored['cost']
+        # cost is now always kWh x 0.07 (house rule); pass cost=NNN only to override an exceptional month
 
         D, A, metrics, detail = await asyncio.to_thread(
             report_engine.prepare, file_bytes, year, month, prev, prev2, cost)

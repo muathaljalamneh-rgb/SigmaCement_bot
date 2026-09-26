@@ -57,6 +57,15 @@ MAT_ALIASES = {  # normalized (lower, no dots, single spaces) -> canonical
  'gypsum taf': 'Gypsum Taf', 'additive': 'Additive', 'grinding aids': 'Grinding aids',
  'quality enhancer': 'Quality enhancer', 'air entraining agent': 'Air entraining agent'}
 
+import re as _re
+_GRADE_SUFFIX = _re.compile(r'\s+\d{2}[.,]5\s*(CEM\s*I{1,3})?\s*$', _re.IGNORECASE)
+
+def canon_product(name):
+    """'Power white 52.5 CEM II' -> 'Power white'; leaves 'CEM I 52,5 R', 'M50' etc. untouched."""
+    n = str(name).strip()
+    base = _GRADE_SUFFIX.sub('', n).strip()
+    return NAME_MAP.get(base if base else n, NAME_MAP.get(n, base if base else n))
+
 def canon_mat(name):
     n = ' '.join(str(name).replace('.', '').split()).lower()
     return MAT_ALIASES.get(n, str(name).strip())
@@ -140,7 +149,7 @@ def extract(file_bytes):
     IGNORE_ROWS = {'flushing', 'availability', 'pozz-crete', ''}
     for r in rows[1:14]:
         p_raw = str(r[0]).strip() if r[0] else ''
-        p = NAME_MAP.get(p_raw, p_raw)
+        p = canon_product(p_raw)
         pv_ = _f(r[colmap.get('prod', 1)])
         if (p not in LIMITS and p.lower() not in IGNORE_ROWS
                 and pv_ and pv_ > 0.5 and not str(p_raw).replace('.', '').isdigit()):
@@ -282,7 +291,7 @@ def extract(file_bytes):
                      'r45': 'r45', 'wi': 'whiteness'}
     for day, sheet in daily:
         rws = [list(r) for r in wb[sheet].iter_rows(values_only=True)]
-        heads = [NAME_MAP.get(str(h).strip(), str(h).strip()) if h else '' for h in rws[0]]
+        heads = [canon_product(h) if h else '' for h in rws[0]]
         rowmap = {}
         for ri, r in enumerate(rws[:18]):
             lab = norm(r[0] or '')

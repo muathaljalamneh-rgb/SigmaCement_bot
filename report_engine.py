@@ -174,7 +174,7 @@ def extract(file_bytes):
                         return _f(vals[ci])
                 return None
             D['plant'] = {'availability': by('availability'), 'utilization': by('utilization'),
-                          'prod': by('production'), 'avg_tph': by_prefix('av '),
+                          'prod': by('production'), '_sheet_avg_tph': by_prefix('av '),  # ref only — we compute below
                           'kwh': by('power'), 'spc': by('spc'),
                           'hours': by('running'), 'cost': by('electricity')}
             break
@@ -355,8 +355,14 @@ def extract(file_bytes):
         s = sum(v for v in net.values() if v)
         D['plant']['hours'] = round(s, 1) if s else round(sum(
             (v.get('hours') or 0) for v in D['products'].values()), 1)
-    if not D['plant'].get('avg_tph') and D['plant'].get('prod') and D['plant'].get('hours'):
+    # HOUSE RULE: avg_tph = prod / running_hours (not the Excel formula — whose denominator varies)
+    if D['plant'].get('prod') and D['plant'].get('hours') and D['plant']['hours'] > 0:
         D['plant']['avg_tph'] = round(D['plant']['prod'] / D['plant']['hours'], 2)
+        sheet_v = D['plant'].get('_sheet_avg_tph')
+        if sheet_v and abs(D['plant']['avg_tph'] - float(sheet_v)) / float(sheet_v) > 0.01:
+            D['plant']['_tph_sheet_note'] = round(float(sheet_v), 2)  # for reference in report
+    elif not D['plant'].get('avg_tph') and D['plant'].get('_sheet_avg_tph'):
+        D['plant']['avg_tph'] = round(float(D['plant']['_sheet_avg_tph']), 2)
     wb.close()
     return D
 

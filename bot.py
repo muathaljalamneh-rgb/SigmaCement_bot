@@ -26,11 +26,30 @@ except Exception as _e:
 logging.basicConfig(format='%(asctime)s | %(levelname)s | %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── daily multi-department report + web dashboard (guarded like the engines above)
+try:
+    from daily import service as daily_service, parsers as daily_parsers
+    from daily.store import Store as DailyStore
+    DAILY_ERR = None
+except Exception as _e:
+    daily_service = daily_parsers = DailyStore = None
+    DAILY_ERR = repr(_e)
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY  = os.environ["ANTHROPIC_API_KEY"]
 ALLOWED_USERS  = [int(x) for x in os.environ.get("ALLOWED_USER_IDS","").split(",") if x.strip()]
 ADMIN_USER_ID  = int(os.environ.get("ADMIN_USER_ID","0"))
 DATABASE_URL   = os.environ.get("DATABASE_URL","")
+_ids = lambda name: [int(x) for x in os.environ.get(name, "").split(",") if x.strip()]
+UPLOADER_IDS   = _ids("UPLOADER_IDS")              # may upload the daily files (e.g. Eng. Imad)
+NOTIFY_IDS     = _ids("REPORT_NOTIFY_IDS") or [i for i in [ADMIN_USER_ID] + UPLOADER_IDS if i]
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+PUBLIC_URL     = os.environ.get("PUBLIC_URL", "").rstrip("/")
+if not PUBLIC_URL and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
+    PUBLIC_URL = "https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]
+REPORT_TIME    = os.environ.get("REPORT_TIME", "10:00")      # Asia/Amman
+REMINDER_TIME  = os.environ.get("REMINDER_TIME", "09:30")
+DAILY_STORE    = DailyStore(DATABASE_URL, os.environ.get("DB_SSLMODE", "require")) if DailyStore else None
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -321,8 +340,9 @@ def detect_month(fn):
             if yr: return f"{yr.group(1)}-{num}"
     return datetime.now().strftime("%Y-%m")
 
-def is_allowed(uid): return not ALLOWED_USERS or uid in ALLOWED_USERS
+def is_allowed(uid): return not ALLOWED_USERS or uid in ALLOWED_USERS or uid in UPLOADER_IDS
 def is_admin(uid):   return uid == ADMIN_USER_ID
+def is_uploader(uid): return is_admin(uid) or uid in UPLOADER_IDS
 
 SYSTEM = """You are an expert cement production analyst with access to detailed daily production data.
 
@@ -454,6 +474,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*تقرير شهر 6* — التقرير الكامل بالعربي 📄\n"
         "/report — full management PDF 📄\n"
         "/alerts — instant alert summary 🔔\n"
+        "/daily — التقرير اليومي ورابط لوحة المتابعة 📊\n"
         "/reports — list reports | /clear — reset chat",
         parse_mode='Markdown')
 
@@ -571,7 +592,7 @@ async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid): await update.message.reply_text("⛔ Access denied."); return
-    if not is_admin(uid): await update.message.reply_text("⛔ Only admin can upload."); return
+    if not is_uploader(uid): await update.message.reply_text("⛔ Only admin can upload."); return
     doc = update.message.document
     if not doc.file_name.endswith('.xlsx'):
         await update.message.reply_text("⚠️ Please send .xlsx file."); return
@@ -580,6 +601,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(doc.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
+
+        # ── daily department workbooks go to the daily report; the old monthly template continues below
+        if daily_service is not None:
+            sheets = await asyncio.to_thread(daily_parsers.load, file_bytes)
+            if daily_service.is_daily_workbook(sheets):
+                await _handle_daily_upload(update, context, file_bytes, doc.file_name, status_msg)
+                return
+        if not is_admin(uid):
+            await status_msg.edit_text("⛔ Only admin can upload monthly reports."); return
         mk = detect_month(doc.file_name)
 
         # ── NEW: the workbook's own dates are authoritative over the filename
@@ -633,6 +663,89 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Upload error: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
+
+# ── daily report: upload handling, morning publish, reminder, /daily ─────
+async def _notify(context, text, ids):
+    for cid in ids:
+        try:
+            await context.bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning(f"notify {cid} failed: {e}")
+
+async def _handle_daily_upload(update, context, file_bytes, filename, status_msg):
+    await status_msg.edit_text("⏳ قراءة الملف وتحديث التقرير اليومي...")
+    try:
+        kind, day, _ = await asyncio.to_thread(daily_service.ingest, DAILY_STORE, file_bytes, filename,
+                                               update.effective_user.id)
+        rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
+    except Exception as e:
+        logger.exception("daily upload failed")
+        await status_msg.edit_text(f"❌ تعذّر قراءة الملف: {e}"); return
+    await status_msg.edit_text(daily_service.ack_text(kind, day, rep))
+    # a late file after the morning publish: refresh and tell everyone (H3)
+    if await asyncio.to_thread(DAILY_STORE.notified, day):
+        await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, title='🔄 تحديث التقرير'), NOTIFY_IDS)
+
+async def daily_publish_job(context: ContextTypes.DEFAULT_TYPE):
+    day = daily_service.report_day()
+    try:
+        rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
+    except Exception as e:
+        logger.exception("daily publish failed")
+        await _notify(context, f"❌ تعذّر بناء التقرير اليومي {day}: {e}", [ADMIN_USER_ID] if ADMIN_USER_ID else NOTIFY_IDS); return
+    await _notify(context, daily_service.summary_text(rep, PUBLIC_URL), NOTIFY_IDS)
+    await asyncio.to_thread(DAILY_STORE.mark_notified, day)
+
+async def daily_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    day = daily_service.report_day()
+    rep = await asyncio.to_thread(DAILY_STORE.load_report, day)
+    if rep is None:
+        rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
+    miss = daily_service.missing_daily(rep)
+    if miss:
+        await _notify(context, f"⏰ تذكير — ملفات يوم الإنتاج {day} الناقصة:\n• " + "\n• ".join(miss)
+                      + f"\nالتقرير يُنشر الساعة {REPORT_TIME}.", UPLOADER_IDS or NOTIFY_IDS)
+
+async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    if daily_service is None:
+        await update.message.reply_text(f"⚠️ التقرير اليومي غير متاح: {DAILY_ERR}"); return
+    day = None
+    if context.args:
+        try: day = datetime.strptime(context.args[0], "%Y-%m-%d").date()
+        except ValueError:
+            await update.message.reply_text("الصيغة: /daily 2026-08-25"); return
+    day = day or daily_service.report_day()
+    rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
+    await update.message.reply_text(daily_service.summary_text(rep, PUBLIC_URL), disable_web_page_preview=True)
+
+async def _post_init(app):
+    try:
+        await _start_daily(app)
+    except Exception:                    # the daily report must never take the bot down
+        logger.exception("daily report/dashboard failed to start")
+
+async def _start_daily(app):
+    if daily_service is None or not DAILY_STORE:
+        logger.warning(f"daily report disabled: {DAILY_ERR}"); return
+    from datetime import time as dtime
+    from daily.web import make_app
+    from aiohttp import web as aioweb
+    await asyncio.to_thread(DAILY_STORE.init)
+    if app.job_queue is not None:
+        hh, mm = map(int, REPORT_TIME.split(":"))
+        app.job_queue.run_daily(daily_publish_job, dtime(hh, mm, tzinfo=daily_service.TZ), name="daily_publish")
+        hh, mm = map(int, REMINDER_TIME.split(":"))
+        app.job_queue.run_daily(daily_reminder_job, dtime(hh, mm, tzinfo=daily_service.TZ), name="daily_reminder")
+    else:
+        logger.warning("job-queue extra missing: morning publish disabled")
+    if DASHBOARD_PASSWORD:
+        runner = aioweb.AppRunner(make_app(DAILY_STORE, DASHBOARD_PASSWORD, TELEGRAM_TOKEN))
+        await runner.setup()
+        await aioweb.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "8080"))).start()
+        logger.info(f"📊 dashboard listening on :{os.environ.get('PORT', '8080')} ({PUBLIC_URL or 'no PUBLIC_URL'})")
+    else:
+        logger.warning("DASHBOARD_PASSWORD not set: dashboard disabled")
 
 # ── NEW: natural-language report request, e.g. "تقرير شهر 6" / "report month 6"
 AR_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
@@ -768,12 +881,14 @@ def main():
            .write_timeout(300)          # ── NEW: PDF uploads need a long write timeout
            .media_write_timeout(300)
            .pool_timeout(60)
+           .post_init(_post_init)
            .build())
     app.add_handler(CommandHandler("start",   start))
     app.add_handler(CommandHandler("reports", list_reports))
     app.add_handler(CommandHandler("clear",   clear_cmd))
     app.add_handler(CommandHandler("report",  report_cmd))   # ── NEW
     app.add_handler(CommandHandler("alerts",  alerts_cmd))   # ── NEW
+    app.add_handler(CommandHandler("daily",   daily_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🤖 Cement Bot v4 running (PDF report engine enabled)...")

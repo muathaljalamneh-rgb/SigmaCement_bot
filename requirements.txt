@@ -1,4 +1,4 @@
-python-telegram-bot>=21.4,<22
+python-telegram-bot[job-queue]>=21.4,<22
 anthropic>=0.40.0
 psycopg2-binary>=2.9.10
 pandas>=2.2.0
@@ -7,3 +7,4 @@ numpy>=1.26.0
 matplotlib>=3.8.0
 reportlab>=4.0.0
 Pillow>=10.0.0
+aiohttp>=3.9

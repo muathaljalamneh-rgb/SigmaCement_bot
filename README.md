@@ -71,6 +71,34 @@ python bot.py
 - "كم بلغ متوسط البياض لـ Super white؟"
 - "هل في أيام كانت نسبة الكلنكر أقل من المعتاد؟"
 
+## Daily mill report (التقرير اليومي)
+
+Every morning the bot builds one report per **production day (08:00 → 08:00)** from the
+department workbooks and publishes it as an Arabic web dashboard.
+
+**Upload on Telegram** (admin or `UPLOADER_IDS`) — the bot recognises each file by its content,
+names do not matter, and replies with what is still missing:
+
+| Daily | Mill production (month workbook), Mill Operation Process (DCS), Mill product QC, Raw material acquisition, Clinker material, Additive materials, Daily sales |
+|---|---|
+| Once / when changed | Annual plan, mill fan table |
+
+**Schedule (Asia/Amman):** `REMINDER_TIME` (09:30) reminds the uploaders of missing files;
+`REPORT_TIME` (10:00) builds the report and sends the summary + dashboard link to
+`REPORT_NOTIFY_IDS`. A file uploaded later rebuilds the report and sends an update.
+`/daily` or `/daily 2026-08-25` returns the summary on demand.
+
+**Dashboard:** served by the same Railway service on `$PORT`. In Railway → *Settings → Networking*
+click **Generate Domain**, then set `DASHBOARD_PASSWORD` (and optionally `PUBLIC_URL`;
+otherwise `RAILWAY_PUBLIC_DOMAIN` is used).
+
+The checks implement Eng. Imad's *Analyses* specification: counter chains (including a product
+made twice in a day), the 24-hour rule and repeated stoppages, flushing losses, month-to-date vs
+plan and spare stop days, stock weeks and truck-scale receipts, moisture vs lab, wet-basis
+proportions and clinker source vs QC, grinding-aid dosage (ml/min → g/t), exact R45/Blaine/L*
+matching, the six process charts with alarms, silo filling and truck loading vs sales, and the
+monthly strength / setting / SO3 trends. Code: `daily/` · tests: `pytest tests`.
+
 ## Notes
 - Reports are stored **in memory** — if the bot restarts, re-upload reports
 - For persistent storage, a future version can use a database

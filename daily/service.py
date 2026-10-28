@@ -89,7 +89,7 @@ def missing_daily(rep):
     return out
 
 
-def summary_text(rep, url=None, title='📊 التقرير اليومي'):
+def summary_text(rep, url=None, title='📊 التقرير اليومي', key=None):
     k = rep.get('kpis') or {}
     lines = [f"{title} — يوم الإنتاج {rep['day']}"]
     if k:
@@ -106,7 +106,9 @@ def summary_text(rep, url=None, title='📊 التقرير اليومي'):
     if miss:
         lines += ['', '📭 ناقص: ' + '، '.join(miss)]
     if url:
-        lines += ['', f"🔗 {url.rstrip('/')}/day/{rep['day']}"]
+        lines += ['', f"🔗 {url.rstrip('/')}/day/{rep['day']}" + (f'?k={key}' if key else '')]
+    else:
+        lines += ['', 'ℹ️ رابط الداشبورد غير مفعّل بعد: Railway ← Settings ← Networking ← Generate Domain']
     return '\n'.join(lines)
 
 

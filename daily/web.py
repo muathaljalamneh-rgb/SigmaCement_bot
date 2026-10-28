@@ -402,23 +402,42 @@ form{{padding:24px;border:1px solid rgba(128,128,128,.3);border-radius:10px;min-
 <label>كلمة السر<input type="password" name="p" autofocus></label>{err}<button>دخول</button></form></body></html>"""
 
 
+def link_key(secret):
+    """Key embedded in the links the bot sends; opening one signs the browser in."""
+    return hmac.new(secret.encode(), b'sigma-dashboard-link', hashlib.sha256).hexdigest()[:32]
+
+
 def make_app(store, password, secret):
-    """Dashboard app. `store` gives load_report/report_days; password protects every page."""
-    token = hmac.new(secret.encode(), password.encode(), hashlib.sha256).hexdigest()
+    """Dashboard app. Access: the bot's private link (?k=...) or, if set, the password."""
+    key = link_key(secret)
+    token = hmac.new(secret.encode(), (password or key).encode(), hashlib.sha256).hexdigest()
 
     def authed(req):
-        return bool(password) and hmac.compare_digest(req.cookies.get('sg', ''), token)
+        return hmac.compare_digest(req.cookies.get('sg', ''), token)
+
+    def grant(req, to):
+        r = web.HTTPFound(to)
+        r.set_cookie('sg', token, max_age=60 * 60 * 24 * 365, httponly=True, samesite='Lax',
+                     secure=req.headers.get('X-Forwarded-Proto', req.scheme) == 'https')
+        return r
+
+    @web.middleware
+    async def link_login(req, handler):
+        k = req.query.get('k')
+        if k and hmac.compare_digest(k, key):
+            raise grant(req, req.path)
+        return await handler(req)
 
     async def login_get(req):
+        if not password:
+            return web.Response(text='<p dir="rtl" style="font:16px system-ui;padding:24px">افتح الداشبورد من الرابط الذي يرسله البوت في تلجرام (أو أرسل /daily).</p>',
+                                content_type='text/html')
         return web.Response(text=LOGIN.format(err=''), content_type='text/html')
 
     async def login_post(req):
         form = await req.post()
         if password and hmac.compare_digest(form.get('p', ''), password):
-            r = web.HTTPFound('/')
-            r.set_cookie('sg', token, max_age=60 * 60 * 24 * 90, httponly=True, samesite='Lax',
-                         secure=req.headers.get('X-Forwarded-Proto', req.scheme) == 'https')
-            raise r
+            raise grant(req, '/')
         return web.Response(text=LOGIN.format(err='<p class="e">كلمة السر غير صحيحة</p>'), content_type='text/html')
 
     async def index(req):
@@ -447,7 +466,7 @@ def make_app(store, password, secret):
     async def health(req):
         return web.Response(text='ok')
 
-    app = web.Application()
+    app = web.Application(middlewares=[link_login])
     app.router.add_static('/static/', os.path.join(os.path.dirname(__file__), 'static'))
     app.add_routes([web.get('/', index), web.get('/login', login_get), web.post('/login', login_post),
                     web.get('/day/{d}', day_page), web.get('/healthz', health)])

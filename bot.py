@@ -41,14 +41,20 @@ ALLOWED_USERS  = [int(x) for x in os.environ.get("ALLOWED_USER_IDS","").split(",
 ADMIN_USER_ID  = int(os.environ.get("ADMIN_USER_ID","0"))
 DATABASE_URL   = os.environ.get("DATABASE_URL","")
 _ids = lambda name: [int(x) for x in os.environ.get(name, "").split(",") if x.strip()]
-UPLOADER_IDS   = _ids("UPLOADER_IDS")              # may upload the daily files (e.g. Eng. Imad)
-NOTIFY_IDS     = _ids("REPORT_NOTIFY_IDS") or [i for i in [ADMIN_USER_ID] + UPLOADER_IDS if i]
+# daily files may be uploaded by UPLOADER_IDS, or by default by every allowed user (Eng. Imad is one)
+UPLOADER_IDS   = _ids("UPLOADER_IDS") or ALLOWED_USERS
+NOTIFY_IDS     = _ids("REPORT_NOTIFY_IDS") or list(dict.fromkeys(i for i in [ADMIN_USER_ID] + UPLOADER_IDS if i))
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 PUBLIC_URL     = os.environ.get("PUBLIC_URL", "").rstrip("/")
 if not PUBLIC_URL and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
     PUBLIC_URL = "https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]
 REPORT_TIME    = os.environ.get("REPORT_TIME", "10:00")      # Asia/Amman
 REMINDER_TIME  = os.environ.get("REMINDER_TIME", "09:30")
+try:
+    from daily.web import link_key as _link_key
+    DASH_KEY = _link_key(TELEGRAM_TOKEN)
+except Exception:
+    DASH_KEY = None
 DAILY_STORE    = DailyStore(DATABASE_URL, os.environ.get("DB_SSLMODE", "require")) if DailyStore else None
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -684,7 +690,7 @@ async def _handle_daily_upload(update, context, file_bytes, filename, status_msg
     await status_msg.edit_text(daily_service.ack_text(kind, day, rep))
     # a late file after the morning publish: refresh and tell everyone (H3)
     if await asyncio.to_thread(DAILY_STORE.notified, day):
-        await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, title='🔄 تحديث التقرير'), NOTIFY_IDS)
+        await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, title='🔄 تحديث التقرير', key=DASH_KEY), NOTIFY_IDS)
 
 async def daily_publish_job(context: ContextTypes.DEFAULT_TYPE):
     day = daily_service.report_day()
@@ -693,7 +699,7 @@ async def daily_publish_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("daily publish failed")
         await _notify(context, f"❌ تعذّر بناء التقرير اليومي {day}: {e}", [ADMIN_USER_ID] if ADMIN_USER_ID else NOTIFY_IDS); return
-    await _notify(context, daily_service.summary_text(rep, PUBLIC_URL), NOTIFY_IDS)
+    await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, key=DASH_KEY), NOTIFY_IDS)
     await asyncio.to_thread(DAILY_STORE.mark_notified, day)
 
 async def daily_reminder_job(context: ContextTypes.DEFAULT_TYPE):
@@ -717,7 +723,7 @@ async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("الصيغة: /daily 2026-08-25"); return
     day = day or daily_service.report_day()
     rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
-    await update.message.reply_text(daily_service.summary_text(rep, PUBLIC_URL), disable_web_page_preview=True)
+    await update.message.reply_text(daily_service.summary_text(rep, PUBLIC_URL, key=DASH_KEY), disable_web_page_preview=True)
 
 async def _post_init(app):
     try:
@@ -739,13 +745,10 @@ async def _start_daily(app):
         app.job_queue.run_daily(daily_reminder_job, dtime(hh, mm, tzinfo=daily_service.TZ), name="daily_reminder")
     else:
         logger.warning("job-queue extra missing: morning publish disabled")
-    if DASHBOARD_PASSWORD:
-        runner = aioweb.AppRunner(make_app(DAILY_STORE, DASHBOARD_PASSWORD, TELEGRAM_TOKEN))
-        await runner.setup()
-        await aioweb.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "8080"))).start()
-        logger.info(f"📊 dashboard listening on :{os.environ.get('PORT', '8080')} ({PUBLIC_URL or 'no PUBLIC_URL'})")
-    else:
-        logger.warning("DASHBOARD_PASSWORD not set: dashboard disabled")
+    runner = aioweb.AppRunner(make_app(DAILY_STORE, DASHBOARD_PASSWORD, TELEGRAM_TOKEN))
+    await runner.setup()
+    await aioweb.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "8080"))).start()
+    logger.info(f"📊 dashboard listening on :{os.environ.get('PORT', '8080')} ({PUBLIC_URL or 'no public domain yet'})")
 
 # ── NEW: natural-language report request, e.g. "تقرير شهر 6" / "report month 6"
 AR_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')

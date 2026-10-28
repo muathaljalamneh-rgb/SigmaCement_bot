@@ -76,7 +76,7 @@ python bot.py
 Every morning the bot builds one report per **production day (08:00 → 08:00)** from the
 department workbooks and publishes it as an Arabic web dashboard.
 
-**Upload on Telegram** (admin or `UPLOADER_IDS`) — the bot recognises each file by its content,
+**Upload on Telegram** (admin, `UPLOADER_IDS`, or by default every `ALLOWED_USER_IDS` user) — the bot recognises each file by its content,
 names do not matter, and replies with what is still missing:
 
 | Daily | Mill production (month workbook), Mill Operation Process (DCS), Mill product QC, Raw material acquisition, Clinker material, Additive materials, Daily sales |
@@ -89,8 +89,9 @@ names do not matter, and replies with what is still missing:
 `/daily` or `/daily 2026-08-25` returns the summary on demand.
 
 **Dashboard:** served by the same Railway service on `$PORT`. In Railway → *Settings → Networking*
-click **Generate Domain**, then set `DASHBOARD_PASSWORD` (and optionally `PUBLIC_URL`;
-otherwise `RAILWAY_PUBLIC_DOMAIN` is used).
+click **Generate Domain** once. The bot's messages carry a private link (`?k=…`) that signs the
+browser in; `DASHBOARD_PASSWORD` optionally adds a password login. `PUBLIC_URL` overrides
+`RAILWAY_PUBLIC_DOMAIN`. The summary goes to `REPORT_NOTIFY_IDS` (default: admin + uploaders).
 
 The checks implement Eng. Imad's *Analyses* specification: counter chains (including a product
 made twice in a day), the 24-hour rule and repeated stoppages, flushing losses, month-to-date vs

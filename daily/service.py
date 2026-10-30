@@ -29,8 +29,30 @@ def is_daily_workbook(sheets):
     return P.detect_kind(sheets) is not None
 
 
-def ingest(store, data, filename, uid=None, now=None):
-    """Parse + store one uploaded workbook. Returns (kind, day, parsed)."""
+def parse_day_arg(text, today=None):
+    """'2026-08-25', '25-8-2026', '25/8', '٢٥-٨' → date (None if not a date)."""
+    import re
+    t = str(text or '').translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')).strip()
+    today = today or now_local().date()
+    m = re.fullmatch(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', t)
+    try:
+        if m:
+            return dt.date(int(m[1]), int(m[2]), int(m[3]))
+        m = re.fullmatch(r'(\d{1,2})[-/.](\d{1,2})(?:[-/.](\d{2,4}))?', t)
+        if m:
+            y = int(m[3]) if m[3] else today.year
+            y = y + 2000 if y < 100 else y
+            return dt.date(y, int(m[2]), int(m[1]))
+    except ValueError:
+        return None
+    return None
+
+
+def ingest(store, data, filename, uid=None, now=None, pinned=None):
+    """Parse + store one uploaded workbook. Returns (kind, day, parsed).
+
+    Cumulative workbooks (QC, truck scale, lab) have no day of their own: they count for the
+    pinned working day if one is chosen, else for yesterday's production day."""
     now = now or now_local()
     sheets = P.load(data)
     kind = P.detect_kind(sheets)
@@ -38,8 +60,10 @@ def ingest(store, data, filename, uid=None, now=None):
         raise ValueError('لم أتعرف على نوع الملف')
     parsed = P.PARSERS[kind](data, sheets) if kind in P.PARSERS else None
     day = P.file_day(kind, parsed) if parsed is not None else None
+    if kind == 'mill_production' and pinned and (pinned in parsed['daily_tabs'] or pinned in parsed['days_with_data']):
+        day = pinned                      # the month workbook holds the chosen day
     if day is None:
-        day = report_day(now)
+        day = pinned or report_day(now)
     store.save_file(kind, day, filename, data, uid, now)
     return kind, day, parsed
 
@@ -112,9 +136,11 @@ def summary_text(rep, url=None, title='📊 التقرير اليومي', key=No
     return '\n'.join(lines)
 
 
-def ack_text(kind, day, rep):
+def ack_text(kind, day, rep, pinned=None):
     miss = missing_daily(rep)
     s = f"✅ استلمت {P.KINDS_AR.get(kind, kind)} — يوم الإنتاج {day}"
+    if pinned and day != pinned:
+        s += f"\n⚠️ هذا الملف ليوم {day} وليس يوم العمل المختار {pinned}"
     if kind == 'mill_production':
         s += f"\n🏭 إنتاج اليوم {(rep.get('kpis') or {}).get('production') or 0:g} طن"
     s += '\n' + ('📭 ناقص لهذا اليوم: ' + '، '.join(miss) if miss else '🎉 كل ملفات اليوم وصلت')

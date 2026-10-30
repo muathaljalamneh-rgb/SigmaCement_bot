@@ -483,6 +483,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/report — full management PDF 📄\n"
         "/alerts — instant alert summary 🔔\n"
         "/daily — التقرير اليومي ورابط لوحة المتابعة 📊\n"
+        "/day 25-8-2026 — اختيار يوم العمل · /day auto للتلقائي 📌\n"
         "/reports — list reports | /clear — reset chat",
         parse_mode='Markdown')
 
@@ -683,18 +684,23 @@ async def _notify(context, text, ids):
 async def _handle_daily_upload(update, context, file_bytes, filename, status_msg):
     await status_msg.edit_text("⏳ قراءة الملف وتحديث التقرير اليومي...")
     try:
+        pinned = await asyncio.to_thread(DAILY_STORE.pinned_day)
         kind, day, _ = await asyncio.to_thread(daily_service.ingest, DAILY_STORE, file_bytes, filename,
-                                               update.effective_user.id)
+                                               update.effective_user.id, None, pinned)
         rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
     except Exception as e:
         logger.exception("daily upload failed")
         await status_msg.edit_text(f"❌ تعذّر قراءة الملف: {e}"); return
-    await status_msg.edit_text(daily_service.ack_text(kind, day, rep))
+    await status_msg.edit_text(daily_service.ack_text(kind, day, rep, pinned)
+                               + (f"\n🔗 {PUBLIC_URL}/day/{day}?k={DASH_KEY}" if PUBLIC_URL and DASH_KEY else ""),
+                               disable_web_page_preview=True)
     # a late file after the morning publish: refresh and tell everyone (H3)
     if await asyncio.to_thread(DAILY_STORE.notified, day):
         await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, title='🔄 تحديث التقرير', key=DASH_KEY), NOTIFY_IDS)
 
 async def daily_publish_job(context: ContextTypes.DEFAULT_TYPE):
+    if await asyncio.to_thread(DAILY_STORE.pinned_day):
+        logger.info("working day pinned: morning publish skipped"); return
     day = daily_service.report_day()
     try:
         rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
@@ -705,6 +711,8 @@ async def daily_publish_job(context: ContextTypes.DEFAULT_TYPE):
     await asyncio.to_thread(DAILY_STORE.mark_notified, day)
 
 async def daily_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    if await asyncio.to_thread(DAILY_STORE.pinned_day):
+        return
     day = daily_service.report_day()
     rep = await asyncio.to_thread(DAILY_STORE.load_report, day)
     if rep is None:
@@ -720,12 +728,37 @@ async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ التقرير اليومي غير متاح: {DAILY_ERR}"); return
     day = None
     if context.args:
-        try: day = datetime.strptime(context.args[0], "%Y-%m-%d").date()
-        except ValueError:
-            await update.message.reply_text("الصيغة: /daily 2026-08-25"); return
-    day = day or daily_service.report_day()
+        day = daily_service.parse_day_arg(context.args[0])
+        if not day:
+            await update.message.reply_text("الصيغة: /daily 25-8-2026"); return
+    day = day or await asyncio.to_thread(DAILY_STORE.pinned_day) or daily_service.report_day()
     rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
     await update.message.reply_text(daily_service.summary_text(rep, PUBLIC_URL, key=DASH_KEY), disable_web_page_preview=True)
+
+async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/day 25-8-2026 → work on that day; /day auto → back to the morning schedule."""
+    uid = update.effective_user.id
+    if not is_allowed(uid) or daily_service is None: return
+    arg = (context.args[0] if context.args else "").strip().lower()
+    if not arg:
+        cur = await asyncio.to_thread(DAILY_STORE.pinned_day)
+        await update.message.reply_text(
+            (f"📌 يوم العمل الحالي: {cur}\nكل الملفات المرفوعة تُسجَّل عليه، والإرسال الصباحي متوقف.\n"
+             if cur else "🕘 الوضع تلقائي: كل صباح تقرير يوم الإنتاج السابق.\n")
+            + "لاختيار يوم: /day 25-8-2026\nللرجوع للتلقائي: /day auto"); return
+    if not is_uploader(uid):
+        await update.message.reply_text("⛔ تغيير يوم العمل للمسؤول ومن يرفع الملفات فقط."); return
+    if arg in ("auto", "off", "تلقائي", "الغاء", "إلغاء"):
+        await asyncio.to_thread(DAILY_STORE.set_pinned_day, None)
+        await update.message.reply_text(f"🕘 رجعنا للوضع التلقائي: التذكير {REMINDER_TIME} والتقرير {REPORT_TIME} كل يوم."); return
+    day = daily_service.parse_day_arg(arg)
+    if not day:
+        await update.message.reply_text("ما فهمت التاريخ. مثال: /day 25-8-2026"); return
+    await asyncio.to_thread(DAILY_STORE.set_pinned_day, day)
+    rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
+    await update.message.reply_text(
+        f"📌 يوم العمل صار {day}.\nارفع ملفاته بأي ترتيب، وكل رفع يحدّث التقرير. الإرسال الصباحي متوقف لحد ما ترسل /day auto.\n\n"
+        + daily_service.summary_text(rep, PUBLIC_URL, key=DASH_KEY), disable_web_page_preview=True)
 
 async def _post_init(app):
     try:
@@ -894,6 +927,7 @@ def main():
     app.add_handler(CommandHandler("report",  report_cmd))   # ── NEW
     app.add_handler(CommandHandler("alerts",  alerts_cmd))   # ── NEW
     app.add_handler(CommandHandler("daily",   daily_cmd))
+    app.add_handler(CommandHandler("day",     day_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🤖 Cement Bot v4 running (PDF report engine enabled)...")

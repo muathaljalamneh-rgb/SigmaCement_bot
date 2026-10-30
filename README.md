@@ -86,7 +86,9 @@ names do not matter, and replies with what is still missing:
 **Schedule (Asia/Amman):** `REMINDER_TIME` (09:30) reminds the uploaders of missing files;
 `REPORT_TIME` (10:00) builds the report and sends the summary + dashboard link to
 `REPORT_NOTIFY_IDS`. A file uploaded later rebuilds the report and sends an update.
-`/daily` or `/daily 2026-08-25` returns the summary on demand.
+`/daily` or `/daily 25-8-2026` returns the summary on demand.
+`/day 25-8-2026` pins a working day: every upload (including the cumulative QC/truck-scale/lab
+workbooks) counts for that day and the morning messages pause; `/day auto` resumes the schedule.
 
 **Dashboard:** served by the same Railway service on `$PORT`. In Railway → *Settings → Networking*
 click **Generate Domain** once. The bot's messages carry a private link (`?k=…`) that signs the

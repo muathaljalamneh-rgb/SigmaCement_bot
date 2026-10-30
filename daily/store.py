@@ -37,6 +37,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS daily_reports (
                     day DATE PRIMARY KEY, report TEXT, generated_at TIMESTAMP DEFAULT NOW(),
                     notified_at TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS daily_settings (key TEXT PRIMARY KEY, value TEXT);
             """)
             c.commit()
 
@@ -93,3 +94,19 @@ class Store:
             cur.execute("SELECT notified_at FROM daily_reports WHERE day=%s", (day,))
             r = cur.fetchone()
         return bool(r and r[0])
+
+    # the day the team is working on (None = automatic: yesterday's production day)
+    def pinned_day(self):
+        with self.conn() as c, c.cursor() as cur:
+            cur.execute("SELECT value FROM daily_settings WHERE key='pinned_day'")
+            r = cur.fetchone()
+        return dt.date.fromisoformat(r[0]) if r and r[0] else None
+
+    def set_pinned_day(self, day):
+        with self.conn() as c, c.cursor() as cur:
+            if day is None:
+                cur.execute("DELETE FROM daily_settings WHERE key='pinned_day'")
+            else:
+                cur.execute("""INSERT INTO daily_settings (key, value) VALUES ('pinned_day', %s)
+                               ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""", (day.isoformat(),))
+            c.commit()

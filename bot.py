@@ -25,6 +25,8 @@ except Exception as _e:
 
 logging.basicConfig(format='%(asctime)s | %(levelname)s | %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+# httpx logs every Telegram poll with the full URL, which contains the bot token
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ── daily multi-department report + web dashboard (guarded like the engines above)
 try:

@@ -114,7 +114,8 @@ def detect_kind(sheets):
             return 'process'
         if 'cement type' in f and 'net weight' in f:
             return 'sales'
-        if 'qc summary' in f or 'qc summary' in norm(s):
+        if ('qc summary' in f or 'qc summary' in norm(s)
+                or ('cement type' in f and 'mechanical analyses' in f)):
             return 'qc_summary'
         rows = sheets[s][:12]
         flat = ' '.join(norm(v) for r in rows for v in r if v is not None)
@@ -656,9 +657,47 @@ def parse_fan(file_bytes, sheets=None):
     return sorted(table)
 
 
+# ── QC summary: one row per month and product (Eng. Imad's yearly reference, answer D5) ──
+QCS_FIELDS = {'blaine': ('physical', 'blaine'), 'r45': ('physical', 'ros 45'), 'l_star': (None, 'l*'),
+              'loi': ('chemical', 'loi'), 'so3': ('chemical', 'so3'), 'setting': ('mechanical', 'setting'),
+              's2': (None, '2d'), 's7': (None, '7d'), 's28': (None, '28d'), 'dose': ('raw', 'fayhaa'),
+              'temp_outlet': (None, 'mill outlet'), 'temp_cement': (None, 'cement')}
+
+
+def parse_qc_summary(file_bytes, sheets=None):
+    sheets = sheets or load(file_bytes)
+    name = next((n for n in sheets if norm(n) == 'total'), None) or next(iter(sheets))
+    rows = sheets[name]
+    r1, r2, r3 = (rows[i] if i < len(rows) else () for i in range(3))
+    width = max(len(r1), len(r2), len(r3))
+    group, g = {}, ''
+    for c in range(width):
+        v = norm(r1[c]) if c < len(r1) else ''
+        g = v or g
+        group[c] = g
+    cols = {}
+    for f, (grp, label) in QCS_FIELDS.items():
+        for c in range(2, width):
+            t2 = norm(r2[c]) if c < len(r2) else ''
+            t3 = norm(r3[c]) if c < len(r3) else ''
+            if (label == t3 or (t2 and t2.startswith(label))) and (grp is None or group.get(c, '').startswith(grp)):
+                cols.setdefault(f, c)
+                break
+    out = []
+    for r in rows[3:]:
+        d = as_date(r[0] if r else None)
+        key = product_key(r[1]) if len(r) > 1 else None
+        if not d or not key:
+            continue
+        vals = {f: num(r[c]) for f, c in cols.items() if c < len(r) and num(r[c]) is not None}
+        if vals:
+            out.append({'month': (d.year, d.month), 'product': key, **vals})
+    return out
+
+
 PARSERS = {'mill_production': parse_mill_production, 'process': parse_process, 'qc': parse_qc,
            'acquisition': parse_acquisition, 'clinker': parse_clinker, 'additives': parse_additives,
-           'sales': parse_sales, 'plan': parse_plan, 'fan': parse_fan}
+           'sales': parse_sales, 'plan': parse_plan, 'fan': parse_fan, 'qc_summary': parse_qc_summary}
 
 
 def file_day(kind, parsed):

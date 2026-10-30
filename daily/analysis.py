@@ -1017,6 +1017,58 @@ def loading_check(t, silo_t, scale, sales, qch, prods):
 
 
 # ── 12. quality trend: strength, setting, SO3 (D5) ────────────────────────
+REF_FIELDS = [('blaine', 'Blaine', 0), ('r45', 'R45', 2), ('l_star', 'L*', 2), ('so3', 'SO3', 2),
+              ('setting', 'الشك الابتدائي', 0), ('s2', '2 يوم', 1), ('s7', '7 أيام', 1), ('s28', '28 يوم', 1)]
+
+
+def reference_section(qc, summary, day, al):
+    """This month so far (from the hourly QC log) against the monthly QC summary (answer D5)."""
+    if not summary:
+        return None
+    cur = (day.year, day.month)
+    mtd = defaultdict(lambda: defaultdict(list))
+    for r in (qc or {}).get('hourly', []):
+        if (r['date'].year, r['date'].month) != cur or r['date'] > day or not r['product'] or r['product'] == 'transition':
+            continue
+        for f, src in (('blaine', 'blaine'), ('r45', 'r45'), ('l_star', 'l_star'), ('setting', 'set_initial'),
+                       ('s2', 's2'), ('s7', 's7'), ('s28', 's28')):
+            v = r.get(src)
+            if isinstance(v, (int, float)) and v:
+                mtd[r['product']][f].append(v)
+        so3 = r.get('so3_chem') if isinstance(r.get('so3_chem'), (int, float)) else r.get('so3_xrf')
+        if isinstance(so3, (int, float)) and so3:
+            mtd[r['product']]['so3'].append(so3)
+    out = {}
+    for k in PRODUCT_ORDER:
+        hist = sorted((x for x in summary if x['product'] == k and x['month'] < cur), key=lambda x: x['month'])
+        now = {f: mean(v) for f, v in mtd.get(k, {}).items()}
+        if not hist and not now:
+            continue
+        rng = {}
+        flags = []
+        for f, label, nd in REF_FIELDS:
+            vals = [x[f] for x in hist if x.get(f) is not None]
+            if not vals:
+                continue
+            lo, hi = min(vals), max(vals)
+            rng[f] = (r2(lo, nd), r2(hi, nd), r2(mean(vals), nd))
+            v = now.get(f)
+            if v is None:
+                continue
+            if f in ('s2', 's7', 's28') and v < lo:
+                flags.append(f)
+                al.add('amber', 'الجودة', f'{pname(k)}: متوسط مقاومة {label} هذا الشهر {r2(v, 1)} MPa أقل من أدنى متوسط شهري سابق {r2(lo, 1)}')
+            elif f not in ('s2', 's7', 's28') and not lo <= v <= hi:
+                flags.append(f)
+                al.add('info', 'الجودة', f'{pname(k)}: {label} هذا الشهر {r2(v, nd)} خارج مدى الأشهر السابقة {r2(lo, nd)}–{r2(hi, nd)}')
+        months = [{'month': f"{x['month'][0]}-{x['month'][1]:02d}", **{f: r2(x.get(f), nd) for f, _, nd in REF_FIELDS}}
+                  for x in hist]
+        out[k] = {'name': pname(k), 'months': months, 'range': rng, 'flags': flags,
+                  'mtd': {f: r2(now.get(f), nd) for f, _, nd in REF_FIELDS},
+                  'mtd_n': {f: len(mtd.get(k, {}).get(f, [])) for f, _, _ in REF_FIELDS}}
+    return {'products': out, 'fields': [[f, label] for f, label, _ in REF_FIELDS], 'month': f'{cur[0]}-{cur[1]:02d}'}
+
+
 def quality_section(qc, day, al):
     if not qc:
         return None
@@ -1132,6 +1184,7 @@ def build_report(day, files, meta=None):
     rep['proportions'] = proportions_section(mp, day, qch, qc, proc, prods, al) if qch else None
     rep['process'] = process_section(proc, day, qch, qc, prods, files.get('sales'), files.get('fan'), al) if proc else None
     rep['quality'] = quality_section(qc, day, al)
+    rep['reference'] = reference_section(qc, files.get('qc_summary'), day, al)
     rep['sales'] = sales_section(files.get('sales'), day)
     if files.get('sales') is not None and rep['sales'] and not rep['sales']['trucks']:
         al.add('info', 'المبيعات', 'ملف المبيعات المرفوع لا يحتوي على شاحنات لهذا اليوم')

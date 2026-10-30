@@ -283,8 +283,40 @@ def render_dashboard(rep, days, base='/'):
     parts.append(section('quality', 'الجودة هذا الشهر: المقاومة، زمن الشك، SO3', inner or '<p>لا نتائج مقاومة مسجلة هذا الشهر.</p>',
                          missing=None if qu else 'تقرير المختبر غير مرفوع'))
 
+    # QC summary reference (monthly averages) vs this month so far
+    rf = rep.get('reference')
+    inner = ''
+    ref_charts = {}
+    if rf:
+        fields = rf['fields']
+        for kk, x in rf['products'].items():
+            rows = [[E(m['month'])] + [fmt(m.get(f), 2) for f, _ in fields] for m in x['months']]
+            cells = []
+            for f, _ in fields:
+                v, rng = x['mtd'].get(f), x['range'].get(f)
+                cls = 'neg' if f in x['flags'] else ''
+                cells.append(f"<b class='{cls}'>{fmt(v, 2)}</b>" + (f" <small class='muted'>({x['mtd_n'][f]})</small>" if v is not None else ''))
+            rows.append([f"<b>{E(rf['month'])} حتى اليوم</b>"] + cells)
+            if x['range']:
+                rows.append(['<span class="muted">مدى الأشهر السابقة</span>'] + [
+                    f"<span class='muted' dir='ltr'>{fmt(x['range'][f][0], 2)} – {fmt(x['range'][f][1], 2)}</span>" if f in x['range'] else '—'
+                    for f, _ in fields])
+            inner += f'<h3>{E(x["name"])}</h3>' + table(['الشهر'] + [lbl for _, lbl in fields], rows)
+            if any(m.get('s28') or m.get('s2') for m in x['months']):
+                cid = f'c_ref_{kk}'
+                inner += f'<div class="chart sm"><canvas id="{cid}"></canvas></div>'
+                ref_charts[cid] = {'t': [m['month'] for m in x['months']] + [rf['month'] + ' حتى اليوم'],
+                                   's2': [m.get('s2') for m in x['months']] + [x['mtd'].get('s2')],
+                                   's7': [m.get('s7') for m in x['months']] + [x['mtd'].get('s7')],
+                                   's28': [m.get('s28') for m in x['months']] + [x['mtd'].get('s28')]}
+        inner = ('<p class="muted">متوسطات الأشهر السابقة من ملف ملخص الجودة، مقابل متوسط هذا الشهر حتى اليوم من تقرير المختبر الساعي '
+                 '(بين القوسين عدد القراءات). القيمة الحمراء خارج مدى الأشهر السابقة.</p>' + inner)
+    parts.append(section('ref', 'المقارنة مع ملخص الجودة السنوي', inner,
+                         missing=None if rf else 'ملف ملخص الجودة (QC summary) غير مرفوع'))
+    nav.append(('ref', 'ملخص الجودة'))
+
     navh = ''.join(f'<a href="#{a}">{E(b)}</a>' for a, b in nav)
-    data = {'chem': (ch or {}).get('hours'), 'charts': (pc or {}).get('charts'),
+    data = {'chem': (ch or {}).get('hours'), 'charts': (pc or {}).get('charts'), 'ref': ref_charts,
             'sequence': (pc or {}).get('product_sequence')}
     return PAGE.format(day=E(d), opts=opts, prev=_navlink(base, prev_d, '→ اليوم السابق'),
                        next=_navlink(base, next_d, 'اليوم التالي ←'), files=files, tiles=tiles_html, counts=alarm_counts,
@@ -381,7 +413,7 @@ function panel(id,labels,sets,yTitle,opts){{
   Chart.defaults.font.family='system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif';
   Chart.defaults.color=css('--ink2');
   new Chart(el,{{type:'line',data:{{labels,datasets:sets.map(s=>({{label:s.label,data:s.data,borderColor:css(s.color),backgroundColor:css(s.color),
-    borderWidth:2,pointRadius:0,pointHitRadius:8,tension:.15,spanGaps:true,borderDash:s.dash||[]}}))}},
+    borderWidth:2,pointRadius:labels.length<=15?4:0,pointHitRadius:8,tension:.15,spanGaps:true,borderDash:s.dash||[]}}))}},
    options:{{maintainAspectRatio:false,animation:false,interaction:{{mode:'index',intersect:false}},
     plugins:{{legend:{{display:sets.length>1,position:'top',labels:{{boxWidth:12,boxHeight:2}}}},
       title:{{display:true,text:yTitle,align:'start',color:css('--ink'),font:{{size:12,weight:'600'}}}},
@@ -407,6 +439,8 @@ if(C.vent){{panel('c_fanspd',C.vent.t,[{{label:'سرعة مروحة المطحن
   panel('c_fill',C.vent.t,[{{label:'امتلاء المطحنة',data:g(C.vent,'filling'),color:'--s1'}}],'امتلاء المطحنة');}}
 if(C.seal){{panel('c_seal',C.seal.t,[{{label:'ضغط عزل الهواء',data:g(C.seal,'air_seal'),color:'--s1'}}],'ضغط مروحة عزل الهواء — mbar (إنذار تحت 16)');
   panel('c_sepa',C.seal.t,[{{label:'تيار مروحة الفاصل',data:g(C.seal,'sep_fan_a'),color:'--s1'}}],'تيار مروحة الفاصل — A (120–130 ±1)');}}
+for(const [id,c] of Object.entries(DATA.ref||{{}})){{panel(id,c.t,[{{label:'2 يوم',data:c.s2,color:'--s1'}},{{label:'7 أيام',data:c.s7,color:'--s2'}},
+  {{label:'28 يوم',data:c.s28,color:'--s3'}}],'المقاومة حسب الشهر — MPa');}}
 if(DATA.chem){{const h=DATA.chem;panel('c_chem',h.map(x=>x.hour),[{{label:'R45',data:h.map(x=>x.r45),color:'--s1'}}],'R45 الساعي من المختبر — %');}}
 </script></body></html>"""
 

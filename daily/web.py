@@ -364,7 +364,7 @@ ul.checks{{list-style:none;padding:0}} ul.checks li{{padding:3px 0}}
 .neg{{color:var(--crit)}} .pos{{color:var(--goodtxt)}} small{{font-weight:400}}
 footer{{color:var(--muted);text-align:center;font-size:12px;padding:16px}}
 </style></head><body>
-<header><h1>سيجما للإسمنت — التقرير اليومي للمطحنة</h1>
+<header><h1>سيجما للإسمنت — التقرير اليومي للمطحنة <a class="btn" style="font-size:13px;font-weight:400" href="/upload">⬆️ رفع ملفات</a></h1>
 <div class="bar"><b>يوم الإنتاج {day}</b> <span class="muted">(08:00 ← 08:00 اليوم التالي)</span>
 <label>📅 التاريخ: <input type="date" value="{day}" onchange="if(this.value)location.href='/day/'+this.value"></label>
 {prev}<select aria-label="الأيام التي لها ملفات" onchange="location.href='/day/'+this.value">{opts}</select>{next} {counts}</div>
@@ -409,6 +409,36 @@ if(C.seal){{panel('c_seal',C.seal.t,[{{label:'ضغط عزل الهواء',data:g
   panel('c_sepa',C.seal.t,[{{label:'تيار مروحة الفاصل',data:g(C.seal,'sep_fan_a'),color:'--s1'}}],'تيار مروحة الفاصل — A (120–130 ±1)');}}
 if(DATA.chem){{const h=DATA.chem;panel('c_chem',h.map(x=>x.hour),[{{label:'R45',data:h.map(x=>x.r45),color:'--s1'}}],'R45 الساعي من المختبر — %');}}
 </script></body></html>"""
+
+
+def _file_table(idx):
+    from .parsers import KINDS_AR
+    rows = ''.join(f'<tr><td>{E(KINDS_AR.get(r["kind"], r["kind"]))}</td><td>{E(r["slot"] if r["slot"] != "*" else "آخر نسخة")}</td>'
+                   f'<td>{E(r["filename"])}</td><td>{E(r["uploaded_at"].strftime("%Y-%m-%d %H:%M") if r["uploaded_at"] else "")}</td></tr>'
+                   for r in idx)
+    return (f'<table><thead><tr><th>النوع</th><th>اليوم/الشهر</th><th>الملف</th><th>وقت الرفع</th></tr></thead><tbody>{rows}</tbody></table>'
+            if rows else '<p>لا توجد ملفات بعد.</p>')
+
+
+UPLOAD = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>سيجما — رفع ملفات</title><style>
+body{{margin:0;font:14px/1.7 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;background:#f9f9f7;color:#0b0b0b}}
+@media (prefers-color-scheme:dark){{body{{background:#0d0d0d;color:#f0efec}} section{{background:#1a1a19!important}} .btn{{color:#f0efec!important}}}}
+main{{max-width:900px;margin:0 auto;padding:16px}} section{{background:#fcfcfb;border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px 16px;margin:12px 0}}
+h1{{font-size:20px}} h2{{font-size:16px;margin:0 0 8px}} .btn{{display:inline-block;padding:6px 12px;border:1px solid rgba(128,128,128,.35);border-radius:6px;color:#0b0b0b;text-decoration:none;margin:4px 0}}
+button{{font:inherit;padding:8px 18px;border-radius:6px;border:0;background:#2a78d6;color:#fff;margin-top:10px}} input[type=file]{{font:inherit;max-width:100%}}
+.bad{{color:#d03b3b}} table{{border-collapse:collapse;width:100%;font-size:13px}} th,td{{text-align:right;padding:5px 6px;border-bottom:1px solid rgba(128,128,128,.25)}}
+.tw{{overflow-x:auto}} .muted{{opacity:.75}} #wait{{display:none}}
+</style></head><body><main>
+<h1>⬆️ رفع ملفات التقرير اليومي <a class="btn" style="font-size:13px" href="/">← الداشبورد</a></h1>
+<section><form method="post" action="/upload" enctype="multipart/form-data" onsubmit="document.getElementById('wait').style.display='block'">
+<p>اختر ملف أو أكثر (Excel). البرنامج يتعرف على نوع كل ملف من محتواه، والأسماء لا تهم:</p>
+<p class="muted">إنتاج المطحنة · بيانات التشغيل (DCS) · مختبر المنتج · القبان · تحاليل الكلنكر · المواد المضافة · المبيعات اليومية · الخطة السنوية · جدول المروحة</p>
+<input type="file" name="files" multiple accept=".xlsx,.xlsm"><br><button>رفع وتحديث التقرير</button>
+<p id="wait">⏳ جاري القراءة وبناء التقرير… قد يستغرق دقيقة.</p></form></section>
+{result}
+<section><h2>الملفات المحفوظة</h2><div class="tw">{files}</div></section>
+</main></body></html>"""
 
 
 LOGIN = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -486,13 +516,64 @@ def make_app(store, password, secret):
         page = await asyncio.to_thread(render_dashboard, rep, days)
         return web.Response(text=page, content_type='text/html', headers={'Cache-Control': 'no-store'})
 
+    async def upload_get(req):
+        if not authed(req):
+            raise web.HTTPFound('/login')
+        import asyncio
+        idx = await asyncio.to_thread(store.file_index)
+        return web.Response(text=UPLOAD.format(result='', files=_file_table(idx)), content_type='text/html',
+                            headers={'Cache-Control': 'no-store'})
+
+    async def upload_post(req):
+        if not authed(req):
+            raise web.HTTPFound('/login')
+        import asyncio
+        from . import service as SV
+        from .parsers import KINDS_AR
+        reader = await req.multipart()
+        pinned = await asyncio.to_thread(store.pinned_day)
+        rows, days = [], set()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if not part.filename:
+                continue
+            data = await part.read(decode=False)
+            name = part.filename
+            if not name.lower().endswith(('.xlsx', '.xlsm')):
+                rows.append(f'<li class="bad">✗ {E(name)}: ليس ملف Excel (.xlsx)</li>')
+                continue
+            try:
+                kind, day, _ = await asyncio.to_thread(SV.ingest, store, bytes(data), name, None, None, pinned)
+            except Exception as e:
+                rows.append(f'<li class="bad">✗ {E(name)}: {E(e)}</li>')
+                continue
+            if kind in ('mill_production', 'process', 'sales'):
+                days.add(day)
+            rows.append(f'<li>✓ {E(name)} ← <b>{E(KINDS_AR.get(kind, kind))}</b>'
+                        + (f' · يوم {E(day)}' if kind in ('mill_production', 'process', 'sales') else '') + '</li>')
+        if pinned:
+            days.add(pinned)
+        built = []
+        for d in sorted(days):
+            rep = await asyncio.to_thread(SV.rebuild, store, d)
+            if rep.get('products') is not None:
+                built.append(f'<a class="btn" href="/day/{d}">📊 تقرير {d}</a>')
+        result = (f'<section><h2>نتيجة الرفع</h2><ul>{"".join(rows) or "<li>لم يتم اختيار ملفات</li>"}</ul>'
+                  f'<div class="bar">{" ".join(built)}</div></section>')
+        idx = await asyncio.to_thread(store.file_index)
+        return web.Response(text=UPLOAD.format(result=result, files=_file_table(idx)), content_type='text/html',
+                            headers={'Cache-Control': 'no-store'})
+
     async def health(req):
         return web.Response(text='ok')
 
-    app = web.Application(middlewares=[link_login])
+    app = web.Application(middlewares=[link_login], client_max_size=80 * 1024 * 1024)
     app.router.add_static('/static/', os.path.join(os.path.dirname(__file__), 'static'))
     app.add_routes([web.get('/', index), web.get('/login', login_get), web.post('/login', login_post),
-                    web.get('/day/{d}', day_page), web.get('/healthz', health)])
+                    web.get('/day/{d}', day_page), web.get('/upload', upload_get), web.post('/upload', upload_post),
+                    web.get('/healthz', health)])
     return app
 
 

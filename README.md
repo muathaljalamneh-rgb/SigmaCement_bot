@@ -89,8 +89,9 @@ names do not matter, and replies with what is still missing:
 `/daily` or `/daily 25-8-2026` returns the summary on demand.
 `/day 25-8-2026` pins a working day: every upload (including the cumulative QC/truck-scale/lab
 workbooks) counts for that day and the morning messages pause; `/day auto` resumes the schedule.
-On the dashboard any day can be picked (list of days found in the uploaded mill workbooks, or a
-calendar); a day without a stored report is built on demand and rebuilt when a newer file arrives.
+The dashboard is self-contained: a date picker is always shown; a day whose production data
+(mill workbook) or daily DCS/sales file was uploaded shows its report, any other day shows
+"no files for this day". Reports are built on demand and rebuilt when a newer file arrives.
 
 **Dashboard:** served by the same Railway service on `$PORT`. In Railway → *Settings → Networking*
 click **Generate Domain** once. The bot's messages carry a private link (`?k=…`) that signs the

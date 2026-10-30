@@ -292,6 +292,22 @@ def render_dashboard(rep, days, base='/'):
                        data=json.dumps(data, ensure_ascii=False).replace('</', '<\\/'))
 
 
+def render_no_files(d, days):
+    """Same page and date picker, with a 'no files for this day' message."""
+    prev_d = max((x for x in days if x < d), default=None)
+    next_d = min((x for x in days if x > d), default=None)
+    opts = '<option value="" selected>— الأيام التي لها ملفات —</option>' + ''.join(
+        f'<option value="{E(x)}">{E(x)}</option>' for x in days)
+    body = (f'<section><h2>لا يوجد ملفات لهذا اليوم</h2><p>لم يُرفع أي ملف ليوم الإنتاج <b>{E(d)}</b>. '
+            'اختر تاريخًا آخر من التقويم أو من قائمة الأيام التي لها ملفات.</p>'
+            + (f'<p class="muted">أقرب يوم سابق له ملفات: {_navlink("/", prev_d, prev_d)}</p>' if prev_d else '')
+            + (f'<p class="muted">أقرب يوم لاحق له ملفات: {_navlink("/", next_d, next_d)}</p>' if next_d else '')
+            + '</section>')
+    return PAGE.format(day=E(d), opts=opts, prev=_navlink('/', prev_d, '→ اليوم السابق'),
+                       next=_navlink('/', next_d, 'اليوم التالي ←'), files='', tiles='', counts='', nav='',
+                       body=body, gen='—', data='{}')
+
+
 def _pname(k):
     from .names import PRODUCT_AR
     return PRODUCT_AR.get(k, k or '—')
@@ -321,7 +337,7 @@ h1{{margin:0 0 6px;font-size:20px}} h2{{font-size:17px;margin:0 0 10px;padding-b
 h3{{font-size:14.5px;margin:16px 0 6px}}
 .bar{{display:flex;flex-wrap:wrap;gap:8px;align-items:center}}
 .btn{{padding:4px 10px;border:1px solid var(--ring);border-radius:6px;color:var(--ink);text-decoration:none;background:var(--page)}}
-.btn.off{{opacity:.4}} select{{padding:4px 8px;border-radius:6px;border:1px solid var(--ring);background:var(--page);color:var(--ink)}}
+.btn.off{{opacity:.4}} input[type=date],select{{padding:4px 8px;border-radius:6px;border:1px solid var(--ring);background:var(--page);color:var(--ink)}}
 .chip{{font-size:12px;padding:2px 8px;border-radius:12px;border:1px solid var(--ring)}} .chip.no{{color:var(--crit)}} .chip.ok{{color:var(--goodtxt)}}
 nav{{position:sticky;top:0;z-index:5;background:var(--surface);border-bottom:1px solid var(--ring);padding:6px 16px;overflow-x:auto;white-space:nowrap}}
 nav a{{color:var(--ink2);text-decoration:none;margin-left:14px;font-size:13px}} nav a:hover{{color:var(--accent)}}
@@ -350,7 +366,8 @@ footer{{color:var(--muted);text-align:center;font-size:12px;padding:16px}}
 </style></head><body>
 <header><h1>سيجما للإسمنت — التقرير اليومي للمطحنة</h1>
 <div class="bar"><b>يوم الإنتاج {day}</b> <span class="muted">(08:00 ← 08:00 اليوم التالي)</span>
-{prev}<select aria-label="اختر اليوم" onchange="location.href='/day/'+this.value">{opts}</select>{next} {counts}</div>
+<label>📅 التاريخ: <input type="date" value="{day}" onchange="if(this.value)location.href='/day/'+this.value"></label>
+{prev}<select aria-label="الأيام التي لها ملفات" onchange="location.href='/day/'+this.value">{opts}</select>{next} {counts}</div>
 <div class="bar" style="margin-top:8px">{files}</div></header>
 <nav>{nav}</nav>
 <main><div class="tiles">{tiles}</div>{body}</main>
@@ -392,12 +409,6 @@ if(C.seal){{panel('c_seal',C.seal.t,[{{label:'ضغط عزل الهواء',data:g
   panel('c_sepa',C.seal.t,[{{label:'تيار مروحة الفاصل',data:g(C.seal,'sep_fan_a'),color:'--s1'}}],'تيار مروحة الفاصل — A (120–130 ±1)');}}
 if(DATA.chem){{const h=DATA.chem;panel('c_chem',h.map(x=>x.hour),[{{label:'R45',data:h.map(x=>x.r45),color:'--s1'}}],'R45 الساعي من المختبر — %');}}
 </script></body></html>"""
-
-
-NO_DAY = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>سيجما — {day}</title><style>body{{font:15px/1.7 system-ui,"Segoe UI",Tahoma,sans-serif;background:#f9f9f7;color:#0b0b0b;padding:16px}}
-@media (prefers-color-scheme:dark){{body{{background:#0d0d0d;color:#f0efec}}a{{color:#3987e5}}}}</style></head><body>
-<h2>لا توجد ملفات مرفوعة ليوم {day}</h2><p>الأيام المرفوعة:</p><ul>{links}</ul></body></html>"""
 
 
 LOGIN = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -453,11 +464,10 @@ def make_app(store, password, secret):
         from .service import available_days
         days = await asyncio.to_thread(available_days, store)
         pinned = await asyncio.to_thread(store.pinned_day)
-        if pinned:
+        if pinned and pinned.isoformat() in days:
             raise web.HTTPFound(f'/day/{pinned.isoformat()}')
-        if not days:
-            return web.Response(text='<p dir="rtl">لا توجد تقارير بعد — ارفع ملفات اليوم على تلجرام.</p>', content_type='text/html')
-        raise web.HTTPFound(f'/day/{days[0]}')
+        from .service import report_day
+        raise web.HTTPFound(f'/day/{days[0] if days else report_day().isoformat()}')
 
     async def day_page(req):
         if not authed(req):
@@ -470,9 +480,8 @@ def make_app(store, password, secret):
         from .service import report_for_view, available_days
         days = await asyncio.to_thread(available_days, store)
         if d.isoformat() not in days:
-            links = ''.join(f'<li><a href="/day/{E(x)}">{E(x)}</a></li>' for x in days[:31])
-            return web.Response(text=NO_DAY.format(day=E(d), links=links or '<li>لا توجد أيام مرفوعة بعد</li>'),
-                                content_type='text/html', status=404)
+            return web.Response(text=render_no_files(d.isoformat(), days), content_type='text/html',
+                                headers={'Cache-Control': 'no-store'})
         rep = await asyncio.to_thread(report_for_view, store, d)
         page = await asyncio.to_thread(render_dashboard, rep, days)
         return web.Response(text=page, content_type='text/html', headers={'Cache-Control': 'no-store'})

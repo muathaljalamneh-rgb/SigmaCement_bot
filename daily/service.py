@@ -65,8 +65,10 @@ def ingest(store, data, filename, uid=None, now=None, pinned=None):
     if day is None:
         day = pinned or report_day(now)
     store.save_file(kind, day, filename, data, uid, now)
-    if kind in P.DAILY_KINDS:            # plan / fan table belong to no particular day
+    if kind in ('mill_production', 'process', 'sales'):   # the yearly/cumulative files belong to no single day
         record_uploaded_day(store, day)
+    if kind == 'mill_production':
+        remember_mill_days(store, parsed)
     return kind, day, parsed
 
 
@@ -134,23 +136,31 @@ def rebuild(store, day, save=True):
 
 def record_uploaded_day(store, day):
     import json
-    raw = store.get_setting('uploaded_days')
-    days = set(json.loads(raw)) if raw is not None else set(available_days(store))
+    days = set(json.loads(store.get_setting('uploaded_days') or '[]'))
     days.add(day.isoformat())
     store.set_setting('uploaded_days', json.dumps(sorted(days)))
 
 
-def available_days(store):
-    """Days that files were actually uploaded for (newest first), plus the pinned working day."""
+def remember_mill_days(store, parsed):
+    """Remember which production days the uploaded mill workbook holds data for."""
     import json
-    raw = store.get_setting('uploaded_days')
-    if raw is None:                       # uploads made before this list existed: the per-day files
-        days = {r['slot'] for r in store.file_index() if r['kind'] in ('process', 'sales')}
-    else:
-        days = set(json.loads(raw))
-    pinned = store.pinned_day()
-    if pinned:
-        days.add(pinned.isoformat())
+    days = set(json.loads(store.get_setting('mill_days') or '[]'))
+    days |= {d.isoformat() for d in set(parsed['days_with_data']) | set(parsed['daily_tabs'])}
+    store.set_setting('mill_days', json.dumps(sorted(days)))
+
+
+def available_days(store):
+    """Days that have files: production data in an uploaded mill workbook, or a daily file (newest first)."""
+    import json
+    if store.get_setting('mill_days') is None:          # workbooks uploaded before this list existed
+        store.set_setting('mill_days', '[]')
+        for month in store.mill_months():
+            f = store.load_file('mill_production', dt.date(int(month[:4]), int(month[5:7]), 1))
+            if f:
+                remember_mill_days(store, P.parse_mill_production(f['data']))
+    days = set(json.loads(store.get_setting('mill_days') or '[]'))
+    days |= set(json.loads(store.get_setting('uploaded_days') or '[]'))
+    days |= {r['slot'] for r in store.file_index() if r['kind'] in ('process', 'sales')}
     return sorted(days, reverse=True)
 
 

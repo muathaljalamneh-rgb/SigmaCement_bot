@@ -65,8 +65,8 @@ def ingest(store, data, filename, uid=None, now=None, pinned=None):
     if day is None:
         day = pinned or report_day(now)
     store.save_file(kind, day, filename, data, uid, now)
-    if kind == 'mill_production':
-        remember_mill_days(store, parsed)
+    if kind in P.DAILY_KINDS:            # plan / fan table belong to no particular day
+        record_uploaded_day(store, day)
     return kind, day, parsed
 
 
@@ -132,28 +132,25 @@ def rebuild(store, day, save=True):
     return rep
 
 
-def _mill_days(parsed):
-    return sorted(set(parsed['days_with_data']) | set(parsed['daily_tabs']))
-
-
-def remember_mill_days(store, parsed):
+def record_uploaded_day(store, day):
     import json
-    known = set(json.loads(store.get_setting('mill_days') or '[]'))
-    known |= {d.isoformat() for d in _mill_days(parsed)}
-    store.set_setting('mill_days', json.dumps(sorted(known)))
+    raw = store.get_setting('uploaded_days')
+    days = set(json.loads(raw)) if raw is not None else set(available_days(store))
+    days.add(day.isoformat())
+    store.set_setting('uploaded_days', json.dumps(sorted(days)))
 
 
 def available_days(store):
-    """Every production day found in the uploaded mill production workbooks (newest first)."""
+    """Days that files were actually uploaded for (newest first), plus the pinned working day."""
     import json
-    raw = store.get_setting('mill_days')
-    if raw is None:                       # files uploaded before this list existed
-        for month in store.mill_months():
-            f = store.load_file('mill_production', dt.date(int(month[:4]), int(month[5:7]), 1))
-            if f:
-                remember_mill_days(store, P.parse_mill_production(f['data']))
-        raw = store.get_setting('mill_days') or '[]'
-    days = set(json.loads(raw)) | {d.isoformat() for d in store.report_days()}
+    raw = store.get_setting('uploaded_days')
+    if raw is None:                       # uploads made before this list existed: the per-day files
+        days = {r['slot'] for r in store.file_index() if r['kind'] in ('process', 'sales')}
+    else:
+        days = set(json.loads(raw))
+    pinned = store.pinned_day()
+    if pinned:
+        days.add(pinned.isoformat())
     return sorted(days, reverse=True)
 
 

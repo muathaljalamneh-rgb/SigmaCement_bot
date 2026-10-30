@@ -61,6 +61,13 @@ class Store:
             return None
         return {'filename': r['filename'], 'data': bytes(r['data']), 'uploaded_at': r['uploaded_at']}
 
+    def file_stamp(self, kind, day):
+        with self.conn() as c, c.cursor() as cur:
+            cur.execute("SELECT filename, uploaded_at FROM daily_files WHERE kind=%s AND slot=%s",
+                        (kind, slot_for(kind, day)))
+            r = cur.fetchone()
+        return {'filename': r[0], 'uploaded_at': r[1]} if r else None
+
     def file_index(self):
         with self.conn() as c, c.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT kind, slot, filename, uploaded_at FROM daily_files ORDER BY uploaded_at DESC")
@@ -80,8 +87,36 @@ class Store:
         return json.loads(r[0]) if r else None
 
     def report_days(self):
+        """Days with a real report (not the 'production file missing' placeholder)."""
         with self.conn() as c, c.cursor() as cur:
-            cur.execute("SELECT day FROM daily_reports ORDER BY day DESC")
+            cur.execute("""SELECT day FROM daily_reports WHERE report LIKE '%%"products":%%' ORDER BY day DESC""")
+            return [r[0] for r in cur.fetchall()]
+
+    def report_generated(self, day):
+        rep = self.load_report(day)
+        return rep.get('generated_at') if rep else None
+
+    def latest_upload(self):
+        with self.conn() as c, c.cursor() as cur:
+            cur.execute("SELECT MAX(uploaded_at) FROM daily_files")
+            r = cur.fetchone()
+        return r[0] if r else None
+
+    def get_setting(self, key):
+        with self.conn() as c, c.cursor() as cur:
+            cur.execute("SELECT value FROM daily_settings WHERE key=%s", (key,))
+            r = cur.fetchone()
+        return r[0] if r else None
+
+    def set_setting(self, key, value):
+        with self.conn() as c, c.cursor() as cur:
+            cur.execute("""INSERT INTO daily_settings (key, value) VALUES (%s, %s)
+                           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""", (key, value))
+            c.commit()
+
+    def mill_months(self):
+        with self.conn() as c, c.cursor() as cur:
+            cur.execute("SELECT slot FROM daily_files WHERE kind='mill_production' ORDER BY slot")
             return [r[0] for r in cur.fetchall()]
 
     def mark_notified(self, day):

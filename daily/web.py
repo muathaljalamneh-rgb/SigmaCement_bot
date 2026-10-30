@@ -48,10 +48,10 @@ def render_dashboard(rep, days, base='/'):
            ('plan', 'الخطة'), ('flush', 'الغسيل'), ('stock', 'المخزون'), ('moist', 'الرطوبة'),
            ('props', 'النسب'), ('chem', 'الكيماويات'), ('qcm', 'مطابقة المختبر'), ('proc', 'التشغيل'),
            ('silos', 'الصوامع والمبيعات'), ('quality', 'الجودة')]
-    idx = days.index(d) if d in days else -1
-    prev_d = days[idx + 1] if 0 <= idx < len(days) - 1 else None
-    next_d = days[idx - 1] if idx > 0 else None
-    opts = ''.join(f'<option value="{E(x)}"{" selected" if x == d else ""}>{E(x)}</option>' for x in days)
+    prev_d = max((x for x in days if x < d), default=None)       # nearest available day either side
+    next_d = min((x for x in days if x > d), default=None)
+    shown = days if d in days else sorted(days + [d], reverse=True)
+    opts = ''.join(f'<option value="{E(x)}"{" selected" if x == d else ""}>{E(x)}</option>' for x in shown)
 
     files = ''.join(
         f'<span class="chip {"ok" if f.get("present") and f.get("covers", True) else "no"}" title="{E(f.get("filename"))}">'
@@ -321,7 +321,7 @@ h1{{margin:0 0 6px;font-size:20px}} h2{{font-size:17px;margin:0 0 10px;padding-b
 h3{{font-size:14.5px;margin:16px 0 6px}}
 .bar{{display:flex;flex-wrap:wrap;gap:8px;align-items:center}}
 .btn{{padding:4px 10px;border:1px solid var(--ring);border-radius:6px;color:var(--ink);text-decoration:none;background:var(--page)}}
-.btn.off{{opacity:.4}} select{{padding:4px 8px;border-radius:6px;border:1px solid var(--ring);background:var(--page);color:var(--ink)}}
+.btn.off{{opacity:.4}} input[type=date],select{{padding:4px 8px;border-radius:6px;border:1px solid var(--ring);background:var(--page);color:var(--ink)}}
 .chip{{font-size:12px;padding:2px 8px;border-radius:12px;border:1px solid var(--ring)}} .chip.no{{color:var(--crit)}} .chip.ok{{color:var(--goodtxt)}}
 nav{{position:sticky;top:0;z-index:5;background:var(--surface);border-bottom:1px solid var(--ring);padding:6px 16px;overflow-x:auto;white-space:nowrap}}
 nav a{{color:var(--ink2);text-decoration:none;margin-left:14px;font-size:13px}} nav a:hover{{color:var(--accent)}}
@@ -350,7 +350,8 @@ footer{{color:var(--muted);text-align:center;font-size:12px;padding:16px}}
 </style></head><body>
 <header><h1>سيجما للإسمنت — التقرير اليومي للمطحنة</h1>
 <div class="bar"><b>يوم الإنتاج {day}</b> <span class="muted">(08:00 ← 08:00 اليوم التالي)</span>
-{prev}<select onchange="location.href='/day/'+this.value">{opts}</select>{next} {counts}</div>
+{prev}<select aria-label="اختر اليوم" onchange="location.href='/day/'+this.value">{opts}</select>{next}
+<label class="muted">أو أي تاريخ: <input type="date" value="{day}" onchange="if(this.value)location.href='/day/'+this.value"></label> {counts}</div>
 <div class="bar" style="margin-top:8px">{files}</div></header>
 <nav>{nav}</nav>
 <main><div class="tiles">{tiles}</div>{body}</main>
@@ -443,7 +444,12 @@ def make_app(store, password, secret):
     async def index(req):
         if not authed(req):
             raise web.HTTPFound('/login')
-        days = await _days(store)
+        import asyncio
+        from .service import available_days
+        days = await asyncio.to_thread(available_days, store)
+        pinned = await asyncio.to_thread(store.pinned_day)
+        if pinned:
+            raise web.HTTPFound(f'/day/{pinned.isoformat()}')
         if not days:
             return web.Response(text='<p dir="rtl">لا توجد تقارير بعد — ارفع ملفات اليوم على تلجرام.</p>', content_type='text/html')
         raise web.HTTPFound(f'/day/{days[0]}')
@@ -456,10 +462,9 @@ def make_app(store, password, secret):
         except ValueError:
             raise web.HTTPNotFound()
         import asyncio
-        rep = await asyncio.to_thread(store.load_report, d)
-        if not rep:
-            raise web.HTTPNotFound(text='لا يوجد تقرير لهذا اليوم')
-        days = await _days(store)
+        from .service import report_for_view, available_days
+        rep = await asyncio.to_thread(report_for_view, store, d)
+        days = await asyncio.to_thread(available_days, store)
         page = await asyncio.to_thread(render_dashboard, rep, days)
         return web.Response(text=page, content_type='text/html', headers={'Cache-Control': 'no-store'})
 

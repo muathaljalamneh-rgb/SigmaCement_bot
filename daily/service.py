@@ -65,18 +65,45 @@ def ingest(store, data, filename, uid=None, now=None, pinned=None):
     if day is None:
         day = pinned or report_day(now)
     store.save_file(kind, day, filename, data, uid, now)
+    if kind == 'mill_production':
+        remember_mill_days(store, parsed)
     return kind, day, parsed
+
+
+_PARSED = {}          # (kind, slot, uploaded_at) → parsed workbook; the yearly QC file alone takes ~4 s
+
+
+def _parsed(store, kind, day):
+    from .store import slot_for
+    stamp = store.file_stamp(kind, day)
+    if not stamp:
+        return None, None
+    key = (kind, slot_for(kind, day), stamp['uploaded_at'])
+    if key not in _PARSED:
+        f = store.load_file(kind, day)
+        parsed = P.PARSERS[kind](f['data']) if kind in P.PARSERS else None
+        for k in [k for k in _PARSED if k[:2] == key[:2]]:
+            del _PARSED[k]                 # drop the older upload of the same slot
+        while len(_PARSED) >= 24:
+            _PARSED.pop(next(iter(_PARSED)))
+        _PARSED[key] = parsed
+    return stamp, _PARSED[key]
 
 
 def load_files(store, day):
     files, meta = {}, {}
     for kind in P.DAILY_KINDS + P.STATIC_KINDS:
-        f = store.load_file(kind, day)
+        try:
+            f, parsed = _parsed(store, kind, day)
+        except Exception as e:
+            f, parsed = store.file_stamp(kind, day), e
         if not f:
             files[kind] = None
             continue
         try:
-            files[kind] = P.PARSERS[kind](f['data']) if kind in P.PARSERS else None
+            if isinstance(parsed, Exception):
+                raise parsed
+            files[kind] = parsed
         except Exception as e:                      # one broken file must not kill the report
             log.exception('parse %s failed', kind)
             files[kind] = None
@@ -90,16 +117,52 @@ def load_files(store, day):
     return files, meta
 
 
-def rebuild(store, day):
+def rebuild(store, day, save=True):
     files, meta = load_files(store, day)
     rep = build_report(day, files, meta)
+    rep['generated_at'] = now_local().strftime('%Y-%m-%d %H:%M')
     for k, m in meta.items():
         if m.get('error'):
             rep['alarms'].insert(0, {'sev': 'red', 'area': 'الملفات', 'text': f"تعذّرت قراءة {P.KINDS_AR.get(k, k)}: {m['error']}"})
         elif m.get('fresh') is False:
             rep['alarms'].append({'sev': 'info', 'area': 'الملفات',
                                   'text': f"{P.KINDS_AR.get(k, k)} مرفوع قبل نهاية يوم الإنتاج ({m['uploaded_at']}) — قد لا يكون محدّثًا"})
-    store.save_report(day, rep)
+    if save or rep.get('products') is not None:
+        store.save_report(day, rep)
+    return rep
+
+
+def _mill_days(parsed):
+    return sorted(set(parsed['days_with_data']) | set(parsed['daily_tabs']))
+
+
+def remember_mill_days(store, parsed):
+    import json
+    known = set(json.loads(store.get_setting('mill_days') or '[]'))
+    known |= {d.isoformat() for d in _mill_days(parsed)}
+    store.set_setting('mill_days', json.dumps(sorted(known)))
+
+
+def available_days(store):
+    """Every production day found in the uploaded mill production workbooks (newest first)."""
+    import json
+    raw = store.get_setting('mill_days')
+    if raw is None:                       # files uploaded before this list existed
+        for month in store.mill_months():
+            f = store.load_file('mill_production', dt.date(int(month[:4]), int(month[5:7]), 1))
+            if f:
+                remember_mill_days(store, P.parse_mill_production(f['data']))
+        raw = store.get_setting('mill_days') or '[]'
+    days = set(json.loads(raw)) | {d.isoformat() for d in store.report_days()}
+    return sorted(days, reverse=True)
+
+
+def report_for_view(store, day):
+    """Report for the dashboard: built on demand, and rebuilt if a file arrived after it."""
+    rep = store.load_report(day)
+    latest = store.latest_upload()
+    if rep is None or (latest and rep.get('generated_at', '') < latest.strftime('%Y-%m-%d %H:%M')):
+        rep = rebuild(store, day, save=False)
     return rep
 
 

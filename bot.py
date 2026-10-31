@@ -479,11 +479,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Which days Blaine below minimum?\n"
         "• Compare production across months\n"
         "• Stoppage hours in April?\n\n"
-        "*تقرير شهر 6* — التقرير الكامل بالعربي 📄\n"
+        "*report month 6* — full monthly PDF 📄\n"
         "/report — full management PDF 📄\n"
         "/alerts — instant alert summary 🔔\n"
-        "/daily — التقرير اليومي ورابط لوحة المتابعة 📊\n"
-        "/day 25-8-2026 — اختيار يوم العمل · /day auto للتلقائي 📌\n"
+        "/daily — daily report and dashboard link 📊\n"
+        "/day 25-8-2026 — choose the working day · /day auto to go back to automatic 📌\n"
         "/reports — list reports | /clear — reset chat",
         parse_mode='Markdown')
 
@@ -578,7 +578,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not explicit:
         await update.message.reply_text(
             f"ℹ️ No month specified — generating the LATEST stored month: *{mk}*.\n"
-            f"For a specific month send: `تقرير شهر N`", parse_mode='Markdown')
+            f"For a specific month send: `report month N`", parse_mode='Markdown')
     await _build_and_send_report(update, mk, cost)
 
 
@@ -668,7 +668,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 Period: {mk}{mk_note}\n"
             f"📦 Data: {data_size:,} chars | {stop_count} stoppage events extracted\n\n"
             f"Summary:\n{summary}\n\n"
-            f"📄 For the full PDF, send:  تقرير شهر {month_num}")
+            f"📄 For the full PDF, send:  report month {month_num}")
     except Exception as e:
         logger.error(f"Upload error: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
@@ -682,7 +682,7 @@ async def _notify(context, text, ids):
             logger.warning(f"notify {cid} failed: {e}")
 
 async def _handle_daily_upload(update, context, file_bytes, filename, status_msg):
-    await status_msg.edit_text("⏳ قراءة الملف وتحديث التقرير اليومي...")
+    await status_msg.edit_text("⏳ Reading the file and updating the daily report...")
     try:
         pinned = await asyncio.to_thread(DAILY_STORE.pinned_day)
         kind, day, _ = await asyncio.to_thread(daily_service.ingest, DAILY_STORE, file_bytes, filename,
@@ -690,13 +690,13 @@ async def _handle_daily_upload(update, context, file_bytes, filename, status_msg
         rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
     except Exception as e:
         logger.exception("daily upload failed")
-        await status_msg.edit_text(f"❌ تعذّر قراءة الملف: {e}"); return
+        await status_msg.edit_text(f"❌ Could not read the file: {e}"); return
     await status_msg.edit_text(daily_service.ack_text(kind, day, rep, pinned)
                                + (f"\n🔗 {PUBLIC_URL}/day/{day}?k={DASH_KEY}" if PUBLIC_URL and DASH_KEY else ""),
                                disable_web_page_preview=True)
     # a late file after the morning publish: refresh and tell everyone (H3)
     if await asyncio.to_thread(DAILY_STORE.notified, day):
-        await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, title='🔄 تحديث التقرير', key=DASH_KEY), NOTIFY_IDS)
+        await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, title='🔄 Report updated', key=DASH_KEY), NOTIFY_IDS)
 
 async def daily_publish_job(context: ContextTypes.DEFAULT_TYPE):
     if await asyncio.to_thread(DAILY_STORE.pinned_day):
@@ -706,7 +706,7 @@ async def daily_publish_job(context: ContextTypes.DEFAULT_TYPE):
         rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
     except Exception as e:
         logger.exception("daily publish failed")
-        await _notify(context, f"❌ تعذّر بناء التقرير اليومي {day}: {e}", [ADMIN_USER_ID] if ADMIN_USER_ID else NOTIFY_IDS); return
+        await _notify(context, f"❌ Could not build the daily report for {day}: {e}", [ADMIN_USER_ID] if ADMIN_USER_ID else NOTIFY_IDS); return
     await _notify(context, daily_service.summary_text(rep, PUBLIC_URL, key=DASH_KEY), NOTIFY_IDS)
     await asyncio.to_thread(DAILY_STORE.mark_notified, day)
 
@@ -719,18 +719,18 @@ async def daily_reminder_job(context: ContextTypes.DEFAULT_TYPE):
         rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
     miss = daily_service.missing_daily(rep)
     if miss:
-        await _notify(context, f"⏰ تذكير — ملفات يوم الإنتاج {day} الناقصة:\n• " + "\n• ".join(miss)
-                      + f"\nالتقرير يُنشر الساعة {REPORT_TIME}.", UPLOADER_IDS or NOTIFY_IDS)
+        await _notify(context, f"⏰ Reminder — files still missing for production day {day}:\n• " + "\n• ".join(miss)
+                      + f"\nThe report is published at {REPORT_TIME}.", UPLOADER_IDS or NOTIFY_IDS)
 
 async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
     if daily_service is None:
-        await update.message.reply_text(f"⚠️ التقرير اليومي غير متاح: {DAILY_ERR}"); return
+        await update.message.reply_text(f"⚠️ Daily report not available: {DAILY_ERR}"); return
     day = None
     if context.args:
         day = daily_service.parse_day_arg(context.args[0])
         if not day:
-            await update.message.reply_text("الصيغة: /daily 25-8-2026"); return
+            await update.message.reply_text("Format: /daily 25-8-2026"); return
     day = day or await asyncio.to_thread(DAILY_STORE.pinned_day) or daily_service.report_day()
     rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
     await update.message.reply_text(daily_service.summary_text(rep, PUBLIC_URL, key=DASH_KEY), disable_web_page_preview=True)
@@ -743,21 +743,21 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not arg:
         cur = await asyncio.to_thread(DAILY_STORE.pinned_day)
         await update.message.reply_text(
-            (f"📌 يوم العمل الحالي: {cur}\nكل الملفات المرفوعة تُسجَّل عليه، والإرسال الصباحي متوقف.\n"
-             if cur else "🕘 الوضع تلقائي: كل صباح تقرير يوم الإنتاج السابق.\n")
-            + "لاختيار يوم: /day 25-8-2026\nللرجوع للتلقائي: /day auto"); return
+            (f"📌 Current working day: {cur}\nEvery upload counts for it and the morning messages are paused.\n"
+             if cur else "🕘 Automatic mode: every morning the report for the previous production day.\n")
+            + "Choose a day: /day 25-8-2026\nBack to automatic: /day auto"); return
     if not is_uploader(uid):
-        await update.message.reply_text("⛔ تغيير يوم العمل للمسؤول ومن يرفع الملفات فقط."); return
+        await update.message.reply_text("⛔ Only the admin and the uploaders can change the working day."); return
     if arg in ("auto", "off", "تلقائي", "الغاء", "إلغاء"):
         await asyncio.to_thread(DAILY_STORE.set_pinned_day, None)
-        await update.message.reply_text(f"🕘 رجعنا للوضع التلقائي: التذكير {REMINDER_TIME} والتقرير {REPORT_TIME} كل يوم."); return
+        await update.message.reply_text(f"🕘 Back to automatic: reminder at {REMINDER_TIME} and report at {REPORT_TIME} every day."); return
     day = daily_service.parse_day_arg(arg)
     if not day:
-        await update.message.reply_text("ما فهمت التاريخ. مثال: /day 25-8-2026"); return
+        await update.message.reply_text("Date not understood. Example: /day 25-8-2026"); return
     await asyncio.to_thread(DAILY_STORE.set_pinned_day, day)
     rep = await asyncio.to_thread(daily_service.rebuild, DAILY_STORE, day)
     await update.message.reply_text(
-        f"📌 يوم العمل صار {day}.\nارفع ملفاته بأي ترتيب، وكل رفع يحدّث التقرير. الإرسال الصباحي متوقف لحد ما ترسل /day auto.\n\n"
+        f"📌 Working day set to {day}.\nUpload its files in any order; every upload updates the report. Morning messages are paused until you send /day auto.\n\n"
         + daily_service.summary_text(rep, PUBLIC_URL, key=DASH_KEY), disable_web_page_preview=True)
 
 async def _post_init(app):
@@ -840,7 +840,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("📭 No Excel workbook stored yet — upload the monthly .xlsx first."); return
             await update.message.reply_text(
                 f"ℹ️ No month specified — generating the LATEST stored month: *{mk_req}*.\n"
-                f"For a specific month send: `تقرير شهر N`", parse_mode='Markdown')
+                f"For a specific month send: `report month N`", parse_mode='Markdown')
         await _build_and_send_report(update, mk_req, cost_req)
         return
 

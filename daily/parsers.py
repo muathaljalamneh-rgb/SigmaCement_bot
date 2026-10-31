@@ -10,11 +10,11 @@ from openpyxl.utils import column_index_from_string
 
 from .names import product_key, material_key, norm
 
-KINDS_AR = {
-    'mill_production': 'تقرير إنتاج المطحنة', 'process': 'بيانات تشغيل المطحنة (DCS)',
-    'qc': 'تقرير مختبر المنتج', 'acquisition': 'تقرير القبان (استلام المواد)',
-    'clinker': 'تحاليل الكلنكر', 'additives': 'تحاليل المواد المضافة', 'sales': 'المبيعات اليومية',
-    'plan': 'الخطة السنوية', 'fan': 'جدول مروحة المطحنة', 'qc_summary': 'ملخص الجودة السنوي',
+KIND_NAMES = {
+    'mill_production': 'Mill production', 'process': 'Mill operation process (DCS)',
+    'qc': 'Mill product QC', 'acquisition': 'Raw material acquisition (truck scale)',
+    'clinker': 'Clinker material', 'additives': 'Additive materials', 'sales': 'Daily sales',
+    'plan': 'Annual plan', 'fan': 'Mill fan table', 'qc_summary': 'QC summary',
 }
 DAILY_KINDS = ['mill_production', 'process', 'qc', 'acquisition', 'clinker', 'additives', 'sales']
 STATIC_KINDS = ['plan', 'fan', 'qc_summary']

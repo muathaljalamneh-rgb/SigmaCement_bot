@@ -1,11 +1,11 @@
 """Canonical product / material names and the mappings agreed with Eng. Imad (answers A2, A3, B4)."""
 import re
 
-# canonical product keys → Arabic display name
-PRODUCT_AR = {
-    'ultra': 'ألترا وايت', 'power': 'باور وايت', 'super': 'سوبر وايت', 'eco': 'إيكو وايت',
-    'low_alkali': 'منخفض القلويات', 'm10': 'M10', 'm50': 'M50', 'vpa': 'VPA', 'flushing': 'غسيل المطحنة',
-    'transition': 'إسمنت انتقالي',
+# canonical product keys → display name
+PRODUCT_NAMES = {
+    'ultra': 'Ultra-white', 'power': 'Power-white', 'super': 'Super-white', 'eco': 'Eco-white',
+    'low_alkali': 'Low-alkali', 'm10': 'M10', 'm50': 'M50', 'vpa': 'VPA', 'flushing': 'Flushing',
+    'transition': 'Transition cement',
 }
 PRODUCT_ORDER = ['ultra', 'power', 'super', 'eco', 'low_alkali', 'm10', 'm50', 'vpa', 'flushing']
 WHITE = {'ultra', 'power', 'super', 'eco'}
@@ -15,8 +15,8 @@ GREY = {'low_alkali', 'm10', 'm50', 'vpa'}
 TARGET_TPH = {'m50': 19.4, 'ultra': 19.9, 'power': 21.0, 'super': 21.5, 'eco': 22.0}
 
 # silo capacity t and dedication (Analyses doc table 1)
-SILOS = {1: (600, 'M50'), 2: (600, 'M50'), 3: (600, 'سوبر وايت'), 4: (200, 'باور / ألترا وايت'),
-         5: (200, 'إيكو / باور / ألترا وايت')}
+SILOS = {1: (600, 'M50'), 2: (600, 'M50'), 3: (600, 'Super-white'), 4: (200, 'Power / Ultra-white'),
+         5: (200, 'Eco / Power / Ultra-white')}
 
 # clinker prices JD/t (answer G3)
 PRICE_WHITE_CLINKER = 90.0
@@ -26,13 +26,13 @@ MATERIALS = ['Clinker ROY', 'Clinker SFW', 'Clinker J', 'Clinker RAK', 'Clinker 
              'Limestone HG', 'VPA', 'Sand', 'Pozzolana', 'Gypsum Az', 'Gypsum Taf']
 WHITE_CLINKERS = ['Clinker ROY', 'Clinker SFW', 'Clinker RAK', 'Clinker ALB']
 GREY_CLINKERS = ['Clinker J', 'Clinker M']
-MATERIAL_AR = {
-    'Clinker ROY': 'كلنكر رويال', 'Clinker SFW': 'كلنكر صفوة', 'Clinker J': 'كلنكر الجوف',
-    'Clinker RAK': 'كلنكر رأس الخيمة', 'Clinker ALB': 'كلنكر سيناء', 'Clinker M': 'كلنكر المناصير',
-    'Clinker IRAQ': 'كلنكر العراق', 'Limestone HG': 'حجر جيري', 'VPA': 'VPA', 'Sand': 'رمل',
-    'Pozzolana': 'بوزولانا', 'Gypsum Az': 'جبس الأزرق', 'Gypsum Taf': 'جبس الطفيلة',
-    'Clinker (total)': 'إجمالي الكلنكر', 'Basalt': 'بازلت', 'Limestone LG': 'حجر جيري LG',
-    'Grinding aids': 'مساعد طحن', 'Quality enhancer': 'محسّن جودة', 'Air entraining agent': 'عامل هواء',
+MATERIAL_NAMES = {
+    'Clinker ROY': 'Clinker ROY (Royal)', 'Clinker SFW': 'Clinker SFW (Safwa)', 'Clinker J': 'Clinker J (Jouf)',
+    'Clinker RAK': 'Clinker RAK', 'Clinker ALB': 'Clinker ALB (Sina)', 'Clinker M': 'Clinker M (Manaseer)',
+    'Clinker IRAQ': 'Clinker Iraq', 'Limestone HG': 'Limestone HG', 'VPA': 'VPA', 'Sand': 'Sand',
+    'Pozzolana': 'Pozzolana', 'Gypsum Az': 'Gypsum Azraq', 'Gypsum Taf': 'Gypsum Tafila',
+    'Clinker (total)': 'Clinker (total)', 'Basalt': 'Basalt', 'Limestone LG': 'Limestone LG',
+    'Grinding aids': 'Grinding aid', 'Quality enhancer': 'Quality enhancer', 'Air entraining agent': 'Air entraining agent',
 }
 
 

@@ -10,9 +10,9 @@ import math
 import re
 from collections import defaultdict, Counter
 
-from .names import (PRODUCT_AR, PRODUCT_ORDER, WHITE, GREY, TARGET_TPH, SILOS, MATERIAL_AR, WHITE_CLINKERS,
+from .names import (PRODUCT_NAMES, PRODUCT_ORDER, WHITE, GREY, TARGET_TPH, SILOS, MATERIAL_NAMES, WHITE_CLINKERS,
                     GREY_CLINKERS, PRICE_WHITE_CLINKER, PRICE_GREY_CLINKER, material_key)
-from .parsers import KINDS_AR
+from .parsers import KIND_NAMES
 
 TOL = {'Running h': 0.05, 'md': 50.0, 'total': 50.0, 'material': 0.5}
 GA_DENSITY = 1.06            # C5: 1.06 ± 0.02 g/ml
@@ -56,11 +56,11 @@ def pearson(a, b):
 
 
 def pname(k):
-    return PRODUCT_AR.get(k, k)
+    return PRODUCT_NAMES.get(k, k)
 
 
 def mname(k):
-    return MATERIAL_AR.get(k, k)
+    return MATERIAL_NAMES.get(k, k)
 
 
 class Alarms(list):
@@ -213,8 +213,8 @@ def counters_section(mp, day, al):
     prev_days = [d for d in segs if d < day and segs[d]]
     if prev_days:
         res['prev_last'] = segs[prev_days[-1]][-1][0]
-    checks = [('Running h', 'عدّاد ساعات التشغيل', rh, TOL['Running h'], f)]
-    for key, label in (('md', 'عدّاد طاقة محرك المطحنة MD'), ('total', 'عدّاد الطاقة الكلية')):
+    checks = [('Running h', 'Running-hours counter', rh, TOL['Running h'], f)]
+    for key, label in (('md', 'Mill drive (MD) power counter'), ('total', 'Total power counter')):
         ser = {k: p[key] for k, p in mp['power'].items() if key in p}
         ff, _ = counter_chain(ser, days, day, TOL[key], prod_days)
         checks.append((key, label, ser, TOL[key], ff))
@@ -223,26 +223,26 @@ def counters_section(mp, day, al):
         ser = {k: b['counters'][m] for k, b in blocks.items() if m in b['counters']}
         ff, _ = counter_chain(ser, days, day, TOL['material'], prod_days)
         if _intervals(ser, day):
-            checks.append((m, f'عدّاد {mname(m)}', ser, TOL['material'], ff))
+            checks.append((m, f'{mname(m)} counter', ser, TOL['material'], ff))
     for key, label, ser, tol, ff in checks:
         for x in ff:
             t = x['type']
             if t == 'multi_ok':
                 res['checks'].append({'counter': label, 'ok': True,
-                                      'text': f"{pname(x['product'])} أُنتج على {x['pieces']} فترات — العداد مجموع البدايات وتم التحقق منه"})
+                                      'text': f"{pname(x['product'])} was produced in {x['pieces']} runs — the counter holds the sum of the starts, verified"})
                 continue
             if t == 'multi_many':
                 res['checks'].append({'counter': label, 'ok': x['ok'],
-                                      'text': 'أكثر من منتج على فترات متعددة — تحقق إجمالي فقط'})
+                                      'text': 'More than one product made in several runs — total check only'})
                 if not x['ok']:
-                    al.add('amber', 'العدادات', f'{label}: مجموع فترات المنتجات المتعددة لا يطابق الفجوات')
+                    al.add('amber', 'Counters', f'{label}: the runs of the multi-run products do not fill the gaps')
                 continue
-            text = {'day_link': f"بداية اليوم {x['found']} لا تساوي نهاية اليوم السابق {x['expected']}",
-                    'gap': f"فجوة في العداد من {x['expected']} إلى {x['found']}",
-                    'overlap': f"تداخل: {pname(x.get('product'))} بدأ عند {x['found']} والمتوقع {x['expected']}",
-                    'multi_mismatch': f"{pname(x.get('product'))} على {x.get('pieces')} فترات لكن مجموع البدايات {x['found']} ≠ {x['expected']}"}[t]
+            text = {'day_link': f"day starts at {x['found']} but the previous day ended at {x['expected']}",
+                    'gap': f"counter gap from {x['expected']} to {x['found']}",
+                    'overlap': f"overlap: {pname(x.get('product'))} starts at {x['found']}, expected {x['expected']}",
+                    'multi_mismatch': f"{pname(x.get('product'))} in {x.get('pieces')} runs but the sum of starts {x['found']} ≠ {x['expected']}"}[t]
             res['checks'].append({'counter': label, 'ok': False, 'text': text})
-            al.add('amber', 'العدادات', f'{label}: {text}')
+            al.add('amber', 'Counters', f'{label}: {text}')
     # counter difference vs reported hours
     for k, b in blocks.items():
         c = b['counters'].get('Running h')
@@ -250,11 +250,11 @@ def counters_section(mp, day, al):
         if c and hrs:
             s, e = c['start'].get(day), c['end'].get(day)
             if s is not None and e is not None and abs((e - s) - hrs) > TOL['Running h']:
-                txt = f"{pname(k)}: فرق العداد {r2(e - s)} س ≠ الساعات المسجلة {r2(hrs)} س"
-                res['checks'].append({'counter': 'ساعات التشغيل', 'ok': False, 'text': txt})
-                al.add('amber', 'العدادات', txt)
+                txt = f"{pname(k)}: counter difference {r2(e - s)} h ≠ reported running hours {r2(hrs)} h"
+                res['checks'].append({'counter': 'Running hours', 'ok': False, 'text': txt})
+                al.add('amber', 'Counters', txt)
     if not any(not c['ok'] for c in res['checks']):
-        res['checks'].append({'counter': 'كل العدادات', 'ok': True, 'text': 'سلسلة العدادات متصلة ولا يوجد خطأ إدخال'})
+        res['checks'].append({'counter': 'All counters', 'ok': True, 'text': 'counter chain is continuous, no entry error'})
     return res
 
 
@@ -273,15 +273,15 @@ def stoppages_section(mp, day, prods, al):
     res = {'stops': stops, 'run_h': r2(run_h), 'stop_h': r2(stop_h), 'pi': {k: r2(v, 3) for k, v in pi.items()},
            'tab_missing': tab is None}
     if run_h == 0:
-        res['note'] = 'لا إنتاج في هذا اليوم — يُعتبر توقفًا مخططًا (جمعة/عطلة)'
+        res['note'] = 'No production on this day — treated as a planned stop (Friday/holiday)'
     elif abs(run_h + stop_h - 24) > 0.1:
-        al.add('amber', 'التوقفات', f'ساعات التشغيل {r2(run_h)} + التوقفات المسجلة {r2(stop_h)} = {r2(run_h + stop_h)} وليس 24 ساعة')
+        al.add('amber', 'Stoppages', f'Running hours {r2(run_h)} + recorded stoppages {r2(stop_h)} = {r2(run_h + stop_h)}, not 24 h')
     pi_sum = sum(pi.get(k) or 0 for k in ('planned', 'idle', 'incident', 'net operation'))
     if pi.get('net operation') is not None and run_h > 0:
         if abs(pi_sum - 24) > 0.1 and run_h:
-            al.add('amber', 'التوقفات', f'تبويب PI: المخطط+الخامل+الأعطال+التشغيل = {r2(pi_sum)} وليس 24')
+            al.add('amber', 'Stoppages', f'PI tab: planned + idle + incident + net operation = {r2(pi_sum)}, not 24')
         if abs((pi.get('net operation') or 0) - run_h) > 0.1:
-            al.add('amber', 'التوقفات', f"تبويب PI: التشغيل الصافي {r2(pi.get('net operation'))} ≠ مجموع ساعات المنتجات {r2(run_h)}")
+            al.add('amber', 'Stoppages', f"PI tab: net operation {r2(pi.get('net operation'))} h ≠ product running hours {r2(run_h)} h")
     # repeated reasons this month
     agg = defaultdict(lambda: {'count': 0, 'hours': 0.0, 'days': [], 'text': '', 'dept': ''})
     for d, t in mp['daily_tabs'].items():
@@ -303,7 +303,7 @@ def stoppages_section(mp, day, prods, al):
     res['month_total_h'] = r2(sum(a['hours'] for a in agg.values()))
     for a in res['repeated'][:3]:
         if a['count'] >= 3:
-            al.add('amber', 'التوقفات', f"سبب توقف متكرر {a['count']} مرات هذا الشهر: {a['reason']} ({a['hours']} س)")
+            al.add('amber', 'Stoppages', f"Stoppage reason repeated {a['count']} times this month: {a['reason']} ({a['hours']} h)")
     return res
 
 
@@ -343,9 +343,9 @@ def flushing_section(mp, day, counters, al):
            'switches': [{'from': pname(a), 'to': pname(b)} for a, b in switches],
            'prices': {'white': PRICE_WHITE_CLINKER, 'grey': PRICE_GREY_CLINKER}}
     if today:
-        al.add('info', 'الغسيل', f"تحويل من رمادي إلى أبيض: فُقد {today['tons']} طن كلنكر أبيض في الغسيل — خسارة {today['loss_jd']} دينار")
+        al.add('info', 'Flushing', f"Grey → white switch: {today['tons']} t of white clinker lost in flushing — loss {today['loss_jd']} JD")
     elif switches:
-        al.add('amber', 'الغسيل', 'يوجد تحويل من رمادي إلى أبيض اليوم لكن لم يُسجَّل كلنكر أبيض ضمن M50/الغسيل')
+        al.add('amber', 'Flushing', 'Grey → white switch today, but no white clinker recorded under M50/flushing')
     return res
 
 
@@ -391,14 +391,14 @@ def plan_section(mp, day, plan, al):
            'has_plan': bool(p)}
     if p:
         if spare < 0:
-            al.add('amber', 'الخطة', f'لتحقيق خطة الشهر تحتاج المطحنة {r2(need_days, 1)} يوم تشغيل والمتبقي {days_left - holidays} يوم — يجب التشغيل في الجمع/العطل ({r2(-spare, 1)} يوم إضافي)')
+            al.add('amber', 'Plan', f'To meet the monthly plan the mill needs {r2(need_days, 1)} running days and {days_left - holidays} days are left — run on Fridays/holidays ({r2(-spare, 1)} extra days)')
         else:
-            al.add('info', 'الخطة', f'يمكن إيقاف المطحنة حتى {r2(spare, 1)} يوم في باقي الشهر مع تحقيق الخطة')
+            al.add('info', 'Plan', f'The mill can stop up to {r2(spare, 1)} days in the rest of the month and still meet the plan')
         for r in rows:
             if r['plan'] and r['pct'] is not None:
                 expected = day.day / dim * 100
                 if r['pct'] < expected - 25:
-                    al.add('info', 'الخطة', f"{r['name']}: المنجز {r['pct']}% من خطة الشهر والمتوقع حتى اليوم ≈{r2(expected, 0)}%")
+                    al.add('info', 'Plan', f"{r['name']}: {r['pct']}% of the monthly plan done, ≈{r2(expected, 0)}% expected by today")
     return res
 
 
@@ -421,15 +421,15 @@ def stock_section(mp, day, acq, al):
         rows.append({'material': m, 'name': mname(m), 'stock': r2(s, 1), 'avg_daily': r2(avg, 1),
                      'weeks': r2(weeks, 1), 'today_use': r2((wet.get(m) or {}).get(day), 1)})
         if s < 0:
-            txt = f'مخزون {mname(m)} سالب ({r2(s, 1)} طن)'
+            txt = f'{mname(m)} stock is negative ({r2(s, 1)} t)'
             if m in GREY_CLINKERS:
                 other = 'Clinker J' if m == 'Clinker M' else 'Clinker M'
                 os_ = (final.get(other) or {}).get(day)
                 if os_ is not None:
-                    txt += f' — يُطرح من {mname(other)}: المصحّح {r2(os_ + s, 1)} طن'
-            al.add('red', 'المخزون', txt)
+                    txt += f' — deducted from {mname(other)}: corrected {r2(os_ + s, 1)} t'
+            al.add('red', 'Stock', txt)
         elif weeks is not None and weeks < STOCK_WEEKS_ALARM and avg and avg > 1:
-            al.add('amber', 'المخزون', f'{mname(m)}: يكفي {r2(weeks, 1)} أسبوع فقط بمعدل {r2(avg, 1)} طن/يوم')
+            al.add('amber', 'Stock', f'{mname(m)}: only {r2(weeks, 1)} weeks left at {r2(avg, 1)} t/day')
     res = {'rows': rows, 'avg_days': [d.isoformat() for d in run_days], 'receipts': [], 'acq_covers': None}
     if acq:
         last = max((d for v in acq['tons'].values() for d in v), default=None)
@@ -449,11 +449,11 @@ def stock_section(mp, day, acq, al):
                                     'diff': r2(diff, 1), 'trucks': (acq['trucks'].get(m) or {}).get(day, 0),
                                     'mtd_scale': r2(mtd, 1), 'bad': bool(bad), 'covered': bool(res['acq_covers'])})
             if bad:
-                al.add('amber', 'الاستلام', f'{mname(m)}: القبان {r2(a, 1)} طن ≠ تبويب المخزون {r2(s, 1)} طن (القبان هو المرجع)')
+                al.add('amber', 'Receipts', f'{mname(m)}: truck scale {r2(a, 1)} t ≠ stock tab {r2(s, 1)} t (truck scale is the reference)')
         if not res['acq_covers']:
-            al.add('info', 'الاستلام', f"ملف القبان آخر تاريخ فيه {res.get('acq_last')} ولا يغطي هذا اليوم")
+            al.add('info', 'Receipts', f"Truck-scale file ends on {res.get('acq_last')} and does not cover this day")
         if 'Clinker M' not in acq['tabs']:
-            res['note_m'] = 'لا يوجد تبويب «Clinker M» في ملف القبان بعد'
+            res['note_m'] = 'No "Clinker M" tab in the truck-scale file yet'
     return res
 
 
@@ -483,7 +483,7 @@ def moisture_section(mp, day, lab, al):
             row['diff'] = r2(diff, 2)
             row['bad'] = abs(diff) > MOIST_TOL_PP
             if row['bad']:
-                al.add('amber', 'الرطوبة', f"{mname(m)}: رطوبة تقرير الإنتاج {row['prod_pct']}% والمختبر {row['lab_pct']}% (عينة {row['lab_date']})")
+                al.add('amber', 'Moisture', f"{mname(m)}: production report moisture {row['prod_pct']}% vs lab {row['lab_pct']}% (sample {row['lab_date']})")
         rows.append(row)
     return {'rows': rows}
 
@@ -495,7 +495,7 @@ def qc_day(qc, day):
 
 def qc_match_section(mp, day, qch, al):
     """Production hourly block row H holds the QC result of hour H-1 (verified on Aug data)."""
-    fields = (('blaine', 'blaine', 'Blaine', 0.5), ('r45', 'r45', 'R45', 1e-6), ('wi', 'l_star', 'البياض L*', 1e-6))
+    fields = (('blaine', 'blaine', 'Blaine', 0.5), ('r45', 'r45', 'R45', 1e-6), ('wi', 'l_star', 'Whiteness L*', 1e-6))
     mism, compared = [], 0
     for h in range(24):
         qh = (h - 1) % 24
@@ -516,7 +516,7 @@ def qc_match_section(mp, day, qch, al):
                 mism.append({'hour': f'{qh:02d}:00', 'field': label, 'production': r2(pv, 3), 'qc': r2(qv, 3),
                              'product': pname(pk)})
     if mism:
-        al.add('amber', 'مطابقة المختبر', f'{len(mism)} قيمة في تقرير الإنتاج لا تطابق تقرير المختبر (R45/Blaine/البياض) — يجب أن تكون مطابقة تمامًا')
+        al.add('amber', 'QC match', f'{len(mism)} values in the production report do not match the QC report (R45/Blaine/whiteness) — they must match exactly')
     return {'compared': compared, 'mismatches': mism}
 
 
@@ -537,7 +537,7 @@ def chem_section(mp, day, qch, qc, proc, prods, al):
         b = mp['blocks'][k]
         dens = (b['chem_density'].get('Grinding aids') or {}).get(day)
         if dens and abs(dens - GA_DENSITY) > GA_DENSITY_TOL + 1e-9:
-            al.add('amber', 'الكيماويات', f'{p["name"]}: كثافة مساعد الطحن في التقرير {dens} وخارج {GA_DENSITY}±{GA_DENSITY_TOL}')
+            al.add('amber', 'Chemicals', f'{p["name"]}: grinding-aid density in the report {dens} is outside {GA_DENSITY}±{GA_DENSITY_TOL}')
         qhrs = [r for r in qch.values() if r['product'] == k and r['chemicals']]
         if not qhrs:
             rows.append({'key': k, 'name': p['name'], 'prod_gpt': p['ga_gpt']})
@@ -553,9 +553,9 @@ def chem_section(mp, day, qch, qc, proc, prods, al):
             diff = (p['ga_gpt'] - qc_gpt) / qc_gpt * 100
             row['diff_pct'] = r2(diff, 1)
             if abs(diff) > GA_TOL_PCT:
-                al.add('amber', 'الكيماويات', f"{p['name']}: جرعة مساعد الطحن في الإنتاج {p['ga_gpt']} g/t والمحسوبة من المختبر {r2(qc_gpt, 0)} g/t (فرق {r2(diff, 1)}%)")
+                al.add('amber', 'Chemicals', f"{p['name']}: grinding-aid dosage {p['ga_gpt']} g/t in production vs {r2(qc_gpt, 0)} g/t from QC ({r2(diff, 1)}% difference)")
         if bd and abs(ml_min - bd) > 0.5:
-            al.add('amber', 'الكيماويات', f'{p["name"]}: جرعة المختبر {r2(ml_min, 1)} ml/min وجرعة دفعة المنتج {bd} ml/min')
+            al.add('amber', 'Chemicals', f'{p["name"]}: QC dosage {r2(ml_min, 1)} ml/min vs product batch dosage {bd} ml/min')
         rows.append(row)
     # D2: R45 above target while dosage below target
     for h, r in sorted(qch.items(), key=lambda x: (x[0] - 8) % 24):
@@ -565,7 +565,7 @@ def chem_section(mp, day, qch, qc, proc, prods, al):
         bd = badge.get(r['product'], {}).get('dose')
         hours.append({'hour': f'{h:02d}:00', 'r45': r45, 'dose': dose, 'feed': r2(feed_by_hour.get(h))})
         if lim and lim[1] is not None and r45 is not None and r45 > lim[1] and dose is not None and bd and dose < bd:
-            al.add('amber', 'الكيماويات', f'الساعة {h:02d}:00: R45 {r45} فوق الهدف بينما الجرعة {dose} أقل من الهدف {bd}')
+            al.add('amber', 'Chemicals', f'{h:02d}:00: R45 {r45} above target while dosage {dose} is below target {bd}')
     return {'rows': rows, 'hours': hours}
 
 
@@ -640,12 +640,12 @@ def proportions_section(mp, day, qch, qc, proc, prods, al):
             rows.append({'material': m, 'name': mname(m), 'prod': r2(pp, 1), 'qc': r2(qp, 1), 'diff': r2(d, 1),
                          'bad': bool(bad)})
             if bad:
-                al.add('amber', 'النسب', f"{p['name']}: نسبة {mname(m)} في الإنتاج {r2(pp or 0, 1)}% وتعليمات المختبر {r2(qp or 0, 1)}%")
+                al.add('amber', 'Proportions', f"{p['name']}: {mname(m)} {r2(pp or 0, 1)}% in production vs {r2(qp or 0, 1)}% in QC instructions")
         # C2: clinker named by QC must be the clinker consumed
         prod_clk = {m for m in wet if m.startswith('Clinker')}
         qc_clk = {m for m in clinker_src}
         for m in sorted(m for m in qc_clk if not (qc_sets.get(m, {m}) & prod_clk)):
-            al.add('red', 'نوع الكلنكر', f"{p['name']}: المختبر يسجّل {mname(m)} لمدة {clinker_src[m]} ساعة لكن الإنتاج استهلك {', '.join(mname(x) for x in sorted(prod_clk)) or '—'}")
+            al.add('red', 'Clinker source', f"{p['name']}: QC records {mname(m)} for {clinker_src[m]} h but production consumed {', '.join(mname(x) for x in sorted(prod_clk)) or '—'}")
         bdg = badge.get(k)
         target = None
         if bdg:
@@ -794,7 +794,7 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
             avg = mean(rates)
             res.setdefault('fill_vs_prod', []).append({'product': p['name'], 'fill_tph': r2(avg, 1), 'prod_tph': p['tph']})
             if abs(avg - p['tph']) / p['tph'] > 0.15:
-                finding('amber', 'الصوامع', f"{p['name']}: معدل امتلاء الصومعة {r2(avg, 1)} ط/س وإنتاجية التقرير {p['tph']} ط/س")
+                finding('amber', 'Silos', f"{p['name']}: silo filling rate {r2(avg, 1)} t/h vs report productivity {p['tph']} t/h")
     # QC silo level vs DCS %
     lvl = []
     for h, r in qch.items():
@@ -810,19 +810,19 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
     res['silo_level_check'] = lvl
     off = [x for x in lvl if abs(x['diff']) > 10]
     if off:
-        finding('amber', 'الصوامع', f'مستوى الصومعة في تقرير المختبر يختلف عن DCS بأكثر من 10% في {len(off)} ساعة')
+        finding('amber', 'Silos', f'Silo level in the QC report differs from DCS by more than 10% in {len(off)} hours')
     # truck loading (F2): each bulk truck shows on the loading scale (0 → ~45 t); the silo
     # level is compared 10 min before vs 10 min after, because aeration makes it noisy
     res['loading'] = loading_check(t, silo_t, g('truck weight at ibau y value'), sales, qch, prods)
     lo = res['loading']
     if sales is not None and lo['events_count'] != lo['m50_trucks']:
-        finding('amber', 'الصوامع والمبيعات', f"عدد مرات التحميل من صوامع M50 ({lo['events_count']}) لا يساوي عدد شاحنات M50 في المبيعات ({lo['m50_trucks']})")
+        finding('amber', 'Silos & sales', f"M50 loadings from the silos ({lo['events_count']}) ≠ M50 trucks in sales ({lo['m50_trucks']})")
     off_lvl = [e for e in lo['events'] if e['net_t'] and e['drop_t'] is not None and abs(e['drop_t'] - e['net_t']) > 5]
     if off_lvl:
-        finding('amber', 'الصوامع والمبيعات', f"في {len(off_lvl)} من {len(lo['events'])} تحميلات يختلف انخفاض مستوى الصومعة عن الوزن الصافي للشاحنة بأكثر من 5 طن — قراءة المستوى أثناء التفريغ غير موثوقة")
+        finding('amber', 'Silos & sales', f"In {len(off_lvl)} of {len(lo['events'])} loadings the silo level drop differs from the truck net weight by more than 5 t — the level reading during discharge is unreliable")
     for e in lo['events']:
         if e['net_t'] and abs(e['scale_t'] - e['net_t']) > 2:
-            finding('amber', 'الصوامع والمبيعات', f"شاحنة {e['truck']} ({e['time']}): ميزان التحميل {e['scale_t']} طن وتذكرة القبان {e['net_t']} طن")
+            finding('amber', 'Silos & sales', f"Truck {e['truck']} ({e['time']}): loading scale {e['scale_t']} t vs weighbridge ticket {e['net_t']} t")
 
     # chart 2: mill drive power / fresh feed / reject / bucket elevator
     tt, b2 = _bucket(t, {'md': md, 'feed': feed, 'reject': rej, 'be': be})
@@ -830,9 +830,9 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
     over = _minutes(t, [v is not None and v > 13 for v in be])
     under = _minutes(t, [r_ and v is not None and v < 10 for v, r_ in zip(be, run)])
     if over > 0:
-        finding('red', 'المطحنة', f'تيار رافع المطحنة فوق 13 A لمدة {r2(over, 0)} دقيقة — المطحنة ممتلئة زيادة')
+        finding('red', 'Mill', f'Mill bucket elevator above 13 A for {r2(over, 0)} min — mill overfilled')
     if under > 60:
-        finding('info', 'المطحنة', f'تيار رافع المطحنة أقل من 10 A لمدة {r2(under, 0)} دقيقة (الطبيعي 10–11.5)')
+        finding('info', 'Mill', f'Mill bucket elevator below 10 A for {r2(under, 0)} min (normal 10–11.5)')
     # empty mill: MD power high with low feed and low reject
     mdv = sorted(v for v in md if v)
     if mdv:
@@ -843,7 +843,7 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
         empty = _minutes(t, [m_ and f_ is not None and rr is not None and m_ >= p90 and f_ <= f10 and rr <= r10
                              for m_, f_, rr in zip(md, feed, rej)])
         if empty >= 10:
-            finding('info', 'المطحنة', f'مؤشر مطحنة فارغة (قدرة عالية مع تغذية ورجيع منخفضين) لمدة {r2(empty, 0)} دقيقة')
+            finding('info', 'Mill', f'Empty-mill pattern (high drive power with low feed and reject) for {r2(empty, 0)} min')
     # feed cut-offs: WF totalizer flat while running (E8: ≥ 4 minutes)
     cuts = []
     for n in range(1, 5):
@@ -867,7 +867,7 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
                 i += 1
     res['feed_cuts'] = cuts
     for c in cuts[:5]:
-        finding('amber', 'التغذية', f"انقطاع مادة {c['material']} ({c['wf']}) من {c['from']} إلى {c['to']} ({c['minutes']} دقيقة)")
+        finding('amber', 'Feeding', f"{c['material']} cut off ({c['wf']}) from {c['from']} to {c['to']} ({c['minutes']} min)")
     # separator fan current (E4) and correlation with reject
     aw = [v for v in g('separator fan drive current') if v is not None]
     if aw:
@@ -876,9 +876,9 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
         res['sep_fan'] = {'avg': r2(avg, 1), 'min': r2(min(aw), 1), 'max': r2(max(aw), 1), 'outside_pct': r2(out_, 0),
                           'r_reject': r2(pearson(g('separator fan drive current'), rej), 2)}
         if not 120 <= avg <= 130:
-            finding('amber', 'الفاصل', f'متوسط تيار مروحة الفاصل {r2(avg, 1)} A خارج النطاق 120–130 A')
+            finding('amber', 'Separator', f'Separator fan current average {r2(avg, 1)} A is outside 120–130 A')
         if out_ > 10:
-            finding('amber', 'الفاصل', f'تيار مروحة الفاصل خرج عن ±1 A من متوسطه {r2(out_, 0)}% من الوقت')
+            finding('amber', 'Separator', f'Separator fan current outside ±1 A of its average {r2(out_, 0)}% of the time')
 
     # chart 3: R45 vs separator speed / separator fan speed
     tt, b3 = _bucket(t, {'r45_dcs': g('r45'), 'sep_speed': g('separator speed'), 'sep_fan_speed': g('separator fan speed'),
@@ -893,15 +893,15 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
             continue
         nxt = [i for i, x in enumerate(t) if x.hour in (h, (h + 1) % 24)]
         acts = []
-        for label, ser, thr in (('التغذية', feed, 0.5), ('سرعة مروحة المطحنة', g('mill fan speed'), 5),
-                                ('سرعة الفاصل', g('separator speed'), 5)):
+        for label, ser, thr in (('fresh feed', feed, 0.5), ('mill fan speed', g('mill fan speed'), 5),
+                                ('separator speed', g('separator speed'), 5)):
             vals = [ser[i] for i in nxt if i < len(ser) and ser[i] is not None]
             if vals and max(vals) - min(vals) >= thr:
-                acts.append(f'{label} تغيّر بين {r2(min(vals), 1)} و{r2(max(vals), 1)}')
+                acts.append(f'{label} moved between {r2(min(vals), 1)} and {r2(max(vals), 1)}')
         actions.append({'hour': f'{h:02d}:00', 'product': pname(r['product']), 'r45': r['r45'], 'target': lim[1],
                         'actions': acts})
-        finding('amber', 'النعومة R45', f"الساعة {h:02d}:00 {pname(r['product'])}: R45 = {r['r45']} فوق الهدف ≤{lim[1]}" +
-                (f" — إجراء المشغل: {'، '.join(acts)}" if acts else ' — لا يظهر إجراء من المشغل'))
+        finding('amber', 'Fineness R45', f"{h:02d}:00 {pname(r['product'])}: R45 = {r['r45']} above target ≤{lim[1]}" +
+                (f" — operator action: {', '.join(acts)}" if acts else ' — no operator action visible'))
     res['r45_actions'] = actions
 
     # chart 4: temperatures
@@ -913,11 +913,11 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
     res['charts']['temps'] = {'t': tt, 'series': b4, 'gas_target': GAS_T, 'cement_target': lim_c}
     off_gas = _minutes(t, [r_ and v is not None and not GAS_T[0] <= v <= GAS_T[1] for v, r_ in zip(gas, run)])
     if off_gas > 30:
-        finding('amber', 'الحرارة', f'حرارة غاز مخرج المطحنة خارج 90–100 °C لمدة {r2(off_gas, 0)} دقيقة')
+        finding('amber', 'Temperature', f'Mill outlet gas temperature outside 90–100 °C for {r2(off_gas, 0)} min')
     if lim_c and lim_c[1]:
         hot = _minutes(t, [r_ and v is not None and v > lim_c[1] for v, r_ in zip(cem, run)])
         if hot > 30:
-            finding('amber', 'الحرارة', f'حرارة الإسمنت النهائي فوق {lim_c[1]} °C لمدة {r2(hot, 0)} دقيقة (الهدف {lim_c[0]}–{lim_c[1]})')
+            finding('amber', 'Temperature', f'Final cement temperature above {lim_c[1]} °C for {r2(hot, 0)} min (target {lim_c[0]}–{lim_c[1]})')
     heater = _minutes(t, [v is not None and v > 100 for v in inlet])
     res['heater_minutes'] = r2(heater, 0)
 
@@ -939,20 +939,20 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
                       'avg_steps': r2(mean(steps), 1), 'blocked_min': r2(blocked, 0), 'velocity': r2(vel, 3),
                       'beyond_table': bool(fspd and max(v for v in fspd if v is not None) > fan[-1][0])}
         if blocked > 30:
-            finding('red', 'التهوية', f"المطحنة مسدودة/التهوية غير كافية لمدة {r2(blocked, 0)} دقيقة: قدرة المروحة {res['fan']['avg_kw']} kW والمحسوبة {res['fan']['kw_calc']} kW عند {res['fan']['avg_rpm']} rpm (أقل بـ {res['fan']['avg_steps']} خطوة)")
+            finding('red', 'Ventilation', f"Mill blocked / ventilation insufficient for {r2(blocked, 0)} min: fan power {res['fan']['avg_kw']} kW vs calculated {res['fan']['kw_calc']} kW at {res['fan']['avg_rpm']} rpm ({res['fan']['avg_steps']} steps lower)")
     rh_hi = _minutes(t, [v is not None and 35 < v <= 100 for v in rh])
     rh_bad = _minutes(t, [v is not None and v > 100 for v in rh])
     if rh_hi > 0:
-        finding('amber', 'التهوية', f'رطوبة غاز مدخل المطحنة فوق 35% لمدة {r2(rh_hi, 0)} دقيقة')
+        finding('amber', 'Ventilation', f'Mill inlet gas RH above 35% for {r2(rh_hi, 0)} min')
     if rh_bad > 0:
-        finding('amber', 'الحساسات', f'حساس رطوبة مدخل المطحنة قرأ أكثر من 100% لمدة {r2(rh_bad, 0)} دقيقة — خطأ حساس')
+        finding('amber', 'Sensors', f'Mill inlet RH sensor read above 100% for {r2(rh_bad, 0)} min — sensor error')
     pos = _minutes(t, [r_ and v is not None and v > 0 for v, r_ in zip(ah, run)])
     if pos > 30:
-        finding('amber', 'التهوية', f'ضغط مدخل المطحنة موجب لمدة {r2(pos, 0)} دقيقة (متوسط {r2(mean(ah), 2)} mbar، الهدف −1 إلى 0) — خفّض مروحة السخان أو افحص التهوية')
+        finding('amber', 'Ventilation', f'Mill inlet pressure positive for {r2(pos, 0)} min (average {r2(mean(ah), 2)} mbar, target −1 to 0) — reduce the heater fan or check ventilation')
     hi_dp = _minutes(t, [r_ and v is not None and v >= 25 for v, r_ in zip(dp, run)])
     res['mill_dp_avg'] = r2(mean(dp), 1)
     if hi_dp > 30:
-        finding('amber', 'التهوية', f'فرق ضغط المطحنة ≥ 25 mbar لمدة {r2(hi_dp, 0)} دقيقة (متوسط {r2(mean(dp), 1)})')
+        finding('amber', 'Ventilation', f'Mill dP ≥ 25 mbar for {r2(hi_dp, 0)} min (average {r2(mean(dp), 1)})')
 
     # chart 6: separator air-seal pressure vs separator fan current
     az = g('separator air seal fan pressure')
@@ -962,7 +962,7 @@ def process_section(proc, day, qch, qc, prods, sales, fan, al):
     res['air_seal'] = {'avg': r2(mean(az), 2), 'min': r2(min((v for v in az if v is not None), default=None), 2),
                        'low_min': r2(low, 0), 'r_current': r2(pearson(az, g('separator fan drive current')), 2)}
     if low > 0:
-        finding('red' if low > 30 else 'amber', 'الفاصل', f'ضغط مروحة عزل الهواء للفاصل أقل من 16 mbar لمدة {r2(low, 0)} دقيقة')
+        finding('red' if low > 30 else 'amber', 'Separator', f'Separator air-seal pressure below 16 mbar for {r2(low, 0)} min')
     return res
 
 
@@ -1018,7 +1018,7 @@ def loading_check(t, silo_t, scale, sales, qch, prods):
 
 # ── 12. quality trend: strength, setting, SO3 (D5) ────────────────────────
 REF_FIELDS = [('blaine', 'Blaine', 0), ('r45', 'R45', 2), ('l_star', 'L*', 2), ('so3', 'SO3', 2),
-              ('setting', 'الشك الابتدائي', 0), ('s2', '2 يوم', 1), ('s7', '7 أيام', 1), ('s28', '28 يوم', 1)]
+              ('setting', 'Initial setting', 0), ('s2', '2D', 1), ('s7', '7D', 1), ('s28', '28D', 1)]
 
 
 def reference_section(qc, summary, day, al):
@@ -1057,10 +1057,10 @@ def reference_section(qc, summary, day, al):
                 continue
             if f in ('s2', 's7', 's28') and v < lo:
                 flags.append(f)
-                al.add('amber', 'الجودة', f'{pname(k)}: متوسط مقاومة {label} هذا الشهر {r2(v, 1)} MPa أقل من أدنى متوسط شهري سابق {r2(lo, 1)}')
+                al.add('amber', 'Quality', f'{pname(k)}: {label} strength this month {r2(v, 1)} MPa is below the lowest previous monthly average {r2(lo, 1)}')
             elif f not in ('s2', 's7', 's28') and not lo <= v <= hi:
                 flags.append(f)
-                al.add('info', 'الجودة', f'{pname(k)}: {label} هذا الشهر {r2(v, nd)} خارج مدى الأشهر السابقة {r2(lo, nd)}–{r2(hi, nd)}')
+                al.add('info', 'Quality', f'{pname(k)}: {label} this month {r2(v, nd)} is outside the previous months range {r2(lo, nd)}–{r2(hi, nd)}')
         months = [{'month': f"{x['month'][0]}-{x['month'][1]:02d}", **{f: r2(x.get(f), nd) for f, _, nd in REF_FIELDS}}
                   for x in hist]
         out[k] = {'name': pname(k), 'months': months, 'range': rng, 'flags': flags,
@@ -1098,17 +1098,17 @@ def quality_section(qc, day, al):
         for s in v['strength']:
             for f in ('s2', 's7', 's28'):
                 if f in s and f in cls and s[f] < cls[f]:
-                    flags.append(f"{s['date']}: {f[1:]} أيام = {s[f]} أقل من الحد {cls[f]} MPa")
+                    flags.append(f"{s['date']}: {f[1:]}-day strength {s[f]} below the minimum {cls[f]} MPa")
         for s in v['setting']:
             if 'set' in cls and s['initial'] < cls['set']:
-                flags.append(f"{s['date']}: زمن الشك الابتدائي {s['initial']} أقل من {cls['set']} دقيقة")
+                flags.append(f"{s['date']}: initial setting {s['initial']} min below {cls['set']} min")
         out[k] = {'name': pname(k), 'class': PRODUCT_CLASS.get(k), 'limits': cls, 'strength': v['strength'][-12:],
                   'setting': v['setting'][-12:], 'last': last, 'flags': flags}
         for f_ in flags[-3:]:
-            al.add('amber', 'الجودة', f'{pname(k)}: {f_}')
+            al.add('amber', 'Quality', f'{pname(k)}: {f_}')
     bad = [s for s in so3 if abs(s['diff']) > 0.2]
     if bad:
-        al.add('info', 'الجودة', f'SO3 بالأشعة والكيميائي يختلفان بأكثر من 0.2 في {len(bad)} عينة هذا الشهر')
+        al.add('info', 'Quality', f'SO3 by XRF and by chemical analysis differ by more than 0.2 in {len(bad)} samples this month')
     return {'products': out, 'so3': so3[-30:], 'so3_bad': len(bad)}
 
 
@@ -1134,7 +1134,7 @@ def build_report(day, files, meta=None):
     mp, proc, qc = files.get('mill_production'), files.get('process'), files.get('qc')
     rep = {'day': day.isoformat(), 'generated_at': dt.datetime.now().strftime('%Y-%m-%d %H:%M'),
            'files': {}, 'missing': []}
-    for k, label in KINDS_AR.items():
+    for k, label in KIND_NAMES.items():
         present = files.get(k) is not None
         info = {'label': label, 'present': present, **(meta.get(k) or {})}
         if k == 'process' and proc is not None:
@@ -1148,15 +1148,15 @@ def build_report(day, files, meta=None):
     if qc is not None:
         rep['files']['qc']['covers'] = any(r['date'] == day for r in qc['hourly'])
     if mp is None or not rep['files']['mill_production'].get('covers'):
-        al.add('red', 'الملفات', 'تقرير إنتاج المطحنة لهذا اليوم غير مرفوع — لا يمكن بناء التقرير')
+        al.add('red', 'Files', 'Mill production report for this day not uploaded — the report cannot be built')
         rep['alarms'] = al
         return rep
     prods = products_today(mp, day)
     qch = qc_day(qc, day)
     if qc is not None and not qch:
-        al.add('amber', 'الملفات', 'تقرير المختبر لا يحتوي على ساعات لهذا اليوم')
+        al.add('amber', 'Files', 'The QC report has no hours for this day')
     if proc is not None and not rep['files']['process'].get('covers'):
-        al.add('amber', 'الملفات', 'ملف بيانات التشغيل المرفوع ليس لهذا اليوم')
+        al.add('amber', 'Files', 'The uploaded process (DCS) file is not for this day')
         proc = None
     rep['products'] = prods
     tot = sum(p['prod'] or 0 for p in prods)
@@ -1165,7 +1165,7 @@ def build_report(day, files, meta=None):
     md = sum(p['md_kwh'] or 0 for p in prods)
     for p in prods:
         if p['target_tph'] and p['tph'] and p['tph'] < p['target_tph']:
-            al.add('amber', 'الإنتاجية', f"{p['name']}: الإنتاجية {p['tph']} ط/س أقل من الهدف {p['target_tph']} ({p['tph_gap_pct']}%)")
+            al.add('amber', 'Productivity', f"{p['name']}: productivity {p['tph']} t/h below target {p['target_tph']} ({p['tph_gap_pct']}%)")
     pi = {k: (v.get(day) if isinstance(v, dict) else None) for k, v in mp['pi'].items()}
     rep['kpis'] = {'production': r2(tot, 1), 'hours': r2(hrs, 2), 'tph': r2(tot / hrs, 2) if hrs else None,
                    'spc_plant': r2(kwh / tot, 2) if tot else None, 'spc_md': r2(md / tot, 2) if tot else None,
@@ -1187,7 +1187,7 @@ def build_report(day, files, meta=None):
     rep['reference'] = reference_section(qc, files.get('qc_summary'), day, al)
     rep['sales'] = sales_section(files.get('sales'), day)
     if files.get('sales') is not None and rep['sales'] and not rep['sales']['trucks']:
-        al.add('info', 'المبيعات', 'ملف المبيعات المرفوع لا يحتوي على شاحنات لهذا اليوم')
+        al.add('info', 'Sales', 'The uploaded sales file has no trucks for this day')
     order = {'red': 0, 'amber': 1, 'info': 2}
     al.sort(key=lambda a: order.get(a['sev'], 3))
     rep['alarms'] = list(al)

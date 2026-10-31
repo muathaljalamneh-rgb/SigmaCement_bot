@@ -74,7 +74,7 @@ python bot.py
 ## Daily mill report (التقرير اليومي)
 
 Every morning the bot builds one report per **production day (08:00 → 08:00)** from the
-department workbooks and publishes it as an Arabic web dashboard.
+department workbooks and publishes it as an English web dashboard.
 
 **Upload on Telegram** (admin, `UPLOADER_IDS`, or by default every `ALLOWED_USER_IDS` user) — the bot recognises each file by its content,
 names do not matter, and replies with what is still missing:

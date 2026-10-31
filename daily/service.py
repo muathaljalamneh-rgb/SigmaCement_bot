@@ -119,10 +119,15 @@ def load_files(store, day):
     return files, meta
 
 
+# Bump when the report's content or wording changes: stored reports of an older version are rebuilt on view.
+ENGINE_VERSION = 2
+
+
 def rebuild(store, day, save=True):
     files, meta = load_files(store, day)
     rep = build_report(day, files, meta)
     rep['generated_at'] = now_local().strftime('%Y-%m-%d %H:%M')
+    rep['engine'] = ENGINE_VERSION
     for k, m in meta.items():
         if m.get('error'):
             rep['alarms'].insert(0, {'sev': 'red', 'area': 'Files', 'text': f"Could not read {P.KIND_NAMES.get(k, k)}: {m['error']}"})
@@ -168,7 +173,8 @@ def report_for_view(store, day):
     """Report for the dashboard: built on demand, and rebuilt if a file arrived after it."""
     rep = store.load_report(day)
     latest = store.latest_upload()
-    if rep is None or (latest and rep.get('generated_at', '') < latest.strftime('%Y-%m-%d %H:%M')):
+    if (rep is None or rep.get('engine') != ENGINE_VERSION
+            or (latest and rep.get('generated_at', '') < latest.strftime('%Y-%m-%d %H:%M'))):
         rep = rebuild(store, day, save=False)
     return rep
 
